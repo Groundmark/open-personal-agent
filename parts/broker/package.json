@@ -1,0 +1,15 @@
+{
+  "name": "@open-personal-agent/broker",
+  "version": "0.0.1",
+  "private": true,
+  "description": "The credential broker: grants approved by passkey, signed log, no raw secret to the agent. Starting modules lifted from an earlier demo; see PROVENANCE.md.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "dependencies": {
+    "@simplewebauthn/browser": "14.0.0",
+    "@simplewebauthn/server": "14.0.3",
+    "qrcode-generator": "2.0.4"
+  }
+}

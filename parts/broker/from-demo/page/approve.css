@@ -1,0 +1,17 @@
+body { font: 17px/1.45 -apple-system, system-ui, sans-serif; margin: 0; background: #fff; color: #111; }
+main { max-width: 36rem; margin: 0 auto; padding: 1rem 16px 3rem; }
+h1 { font-size: 1.5rem; margin: 0.5rem 0 1rem; }
+h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+code { font-size: 0.85em; word-break: break-all; }
+ul { padding-left: 1.2rem; }
+.excluded li { color: #a40000; }
+.grant { font-size: 0.85rem; color: #555; }
+button { font: inherit; font-weight: 600; width: 100%; padding: 0.9rem; margin-top: 1rem; border: 0; border-radius: 0.6rem; background: #0a5cd5; color: #fff; }
+button:disabled { background: #999; }
+#status { min-height: 1.5em; font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  body { background: #111; color: #eee; }
+  .grant { color: #aaa; }
+  .excluded li { color: #ff8080; }
+}
+#status a { display: block; margin-top: 0.75rem; }
