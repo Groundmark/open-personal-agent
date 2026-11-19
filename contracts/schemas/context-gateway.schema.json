@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/context-gateway.schema.json",
+  "title": "Context gateway (0.1-draft)",
+  "$defs": {
+    "context.scopes.result": {
+      "type": "object",
+      "properties": {
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ]
+          }
+        }
+      },
+      "required": [
+        "scopes"
+      ]
+    },
+    "context.read.args": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "scope"
+      ]
+    },
+    "context.read.result": {
+      "type": "object",
+      "properties": {
+        "read_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "captured_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "captured_at"
+            ]
+          }
+        }
+      },
+      "required": [
+        "read_id",
+        "items"
+      ]
+    },
+    "errors": {
+      "enum": [
+        "unknown_scope",
+        "store_unavailable"
+      ]
+    }
+  }
+}

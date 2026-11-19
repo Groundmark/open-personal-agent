@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/broker.schema.json",
+  "title": "Broker: credentials, grants, identity (0.1-draft)",
+  "$defs": {
+    "grant_state": {
+      "enum": [
+        "pending",
+        "approved",
+        "denied",
+        "expired",
+        "consumed",
+        "revoked"
+      ]
+    },
+    "book_constraints": {
+      "type": "object",
+      "properties": {
+        "venue": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string",
+          "format": "date"
+        },
+        "time": {
+          "type": "string",
+          "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+        },
+        "party_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "venue",
+        "date",
+        "time",
+        "party_size"
+      ]
+    },
+    "grant.request.args": {
+      "type": "object",
+      "properties": {
+        "credential": {
+          "type": "string"
+        },
+        "ops": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints": {
+          "type": "object"
+        },
+        "mode": {
+          "enum": [
+            "standing",
+            "one_shot"
+          ]
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+        },
+        "purpose": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential",
+        "ops",
+        "constraints",
+        "mode",
+        "ttl_seconds",
+        "purpose"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ops": {
+                "contains": {
+                  "const": "book"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "one_shot"
+              },
+              "ttl_seconds": {
+                "maximum": 3600
+              },
+              "constraints": {
+                "$ref": "#/$defs/book_constraints"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "grant.request.result": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "const": "pending"
+        },
+        "approve_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "state",
+        "approve_url",
+        "summary"
+      ]
+    },
+    "grant.status.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "required": [
+        "grant_id"
+      ]
+    },
+    "grant.status.result": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "approved",
+            "denied",
+            "expired",
+            "consumed",
+            "revoked"
+          ]
+        },
+        "approved_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "uses": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_used_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "grant_id",
+        "state",
+        "uses"
+      ]
+    },
+    "grant.revoke.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id"
+      ]
+    },
+    "grant.revoke.result": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "const": "revoked"
+        }
+      },
+      "required": [
+        "grant_id",
+        "state"
+      ]
+    },
+    "mcp.call.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "server": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "grant_id",
+        "server",
+        "tool",
+        "arguments"
+      ]
+    },
+    "mcp.call.result": {
+      "type": "object",
+      "properties": {
+        "content": {}
+      },
+      "required": [
+        "content"
+      ]
+    },
+    "identity.sign.args": {
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "enum": [
+            "caller_proof",
+            "declaration",
+            "http_request"
+          ]
+        },
+        "payload_b64": {
+          "type": "string",
+          "contentEncoding": "base64"
+        }
+      },
+      "required": [
+        "purpose",
+        "payload_b64"
+      ]
+    },
+    "identity.sign.result": {
+      "type": "object",
+      "properties": {
+        "kid": {
+          "type": "string"
+        },
+        "alg": {
+          "const": "Ed25519"
+        },
+        "sig_b64": {
+          "type": "string",
+          "contentEncoding": "base64"
+        }
+      },
+      "required": [
+        "kid",
+        "alg",
+        "sig_b64"
+      ]
+    },
+    "identity.declaration.args": {
+      "type": "object",
+      "properties": {
+        "relying_party": {
+          "type": "string"
+        },
+        "act": {
+          "type": "string"
+        },
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "required": [
+        "relying_party",
+        "act"
+      ]
+    },
+    "identity.declaration.result": {
+      "type": "object",
+      "properties": {
+        "declaration": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string"
+            },
+            "operator": {
+              "type": "string"
+            },
+            "agent_kid": {
+              "type": "string"
+            },
+            "relying_party": {
+              "type": "string"
+            },
+            "act": {
+              "type": "string"
+            },
+            "grant_id": {
+              "type": "string",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "ts": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "format",
+            "agent_kid",
+            "relying_party",
+            "act",
+            "ts"
+          ]
+        },
+        "kid": {
+          "type": "string"
+        },
+        "sig_b64": {
+          "type": "string"
+        },
+        "presented": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "declaration",
+        "kid",
+        "sig_b64",
+        "presented"
+      ]
+    },
+    "status.result": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "store": {
+          "type": "string"
+        },
+        "agent_kid": {
+          "type": "string"
+        },
+        "broker_kid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "store",
+        "agent_kid",
+        "broker_kid"
+      ]
+    },
+    "errors": {
+      "enum": [
+        "grant_not_found",
+        "grant_not_approved",
+        "grant_denied",
+        "grant_expired",
+        "grant_revoked",
+        "grant_consumed",
+        "op_not_granted",
+        "constraint_mismatch",
+        "one_shot_required",
+        "credential_not_found",
+        "store_unavailable",
+        "upstream_error",
+        "approval_timeout"
+      ]
+    }
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/channel.schema.json",
+  "title": "Channel: front end (0.1-draft)",
+  "$defs": {
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "mime",
+        "path"
+      ]
+    },
+    "channel.inbound.args": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "channel",
+        "message_id",
+        "from",
+        "text",
+        "received_at"
+      ]
+    },
+    "channel.inbound.result": {
+      "type": "object",
+      "properties": {}
+    },
+    "channel.send.args": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachment"
+          }
+        },
+        "reply_to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "to",
+        "text"
+      ]
+    },
+    "channel.send.result": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "sent_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "message_id",
+        "sent_at"
+      ]
+    },
+    "grant.event.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "enum": [
+            "approved",
+            "denied",
+            "expired"
+          ]
+        }
+      },
+      "required": [
+        "grant_id",
+        "state"
+      ]
+    },
+    "errors": {
+      "enum": [
+        "recipient_not_allowed",
+        "channel_unavailable",
+        "attachment_too_large"
+      ]
+    }
+  }
+}

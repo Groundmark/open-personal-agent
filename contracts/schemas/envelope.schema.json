@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/envelope.schema.json",
+  "title": "Common request/response envelope (0.1-draft)",
+  "$defs": {
+    "ulid": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "pattern": "^[a-z-]+(\\.[a-z_]+)?$"
+        },
+        "id": {
+          "$ref": "#/$defs/ulid"
+        },
+        "caller": {
+          "type": "string",
+          "pattern": "^(core|broker|router|context-gateway|browser-worker|history|channel-[a-z0-9-]+)$"
+        },
+        "errand_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ulid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ts": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "args": {
+          "type": "object"
+        },
+        "sig": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "id",
+        "caller",
+        "errand_id",
+        "ts",
+        "args"
+      ]
+    },
+    "ok_response": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ulid"
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "result"
+      ]
+    },
+    "error_response": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ulid"
+        },
+        "ok": {
+          "const": false
+        },
+        "error": {
+          "type": "string",
+          "pattern": "^[a-z_]+$"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "error"
+      ]
+    },
+    "common_errors": {
+      "enum": [
+        "bad_request",
+        "unknown_op",
+        "unauthorized_caller",
+        "internal"
+      ]
+    }
+  }
+}

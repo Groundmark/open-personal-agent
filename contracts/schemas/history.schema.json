@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/history.schema.json",
+  "title": "History: log lines (0.1-draft)",
+  "$defs": {
+    "action_line": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "errand_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "enum": [
+            "grant.requested",
+            "grant.approved",
+            "grant.denied",
+            "grant.used",
+            "grant.refused",
+            "grant.revoked",
+            "grant.expired",
+            "identity.declaration"
+          ]
+        },
+        "prev_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^$"
+        },
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "detail": {
+          "type": "object"
+        },
+        "sig": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "errand_id",
+        "type",
+        "prev_hash",
+        "sig"
+      ]
+    },
+    "context_read_line": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "errand_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "const": "context.read"
+        },
+        "prev_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^$"
+        },
+        "read_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sig": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "errand_id",
+        "type",
+        "prev_hash",
+        "read_id",
+        "scope",
+        "item_ids",
+        "sig"
+      ]
+    },
+    "conversation_line": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "errand_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "const": "message"
+        },
+        "prev_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^$"
+        },
+        "direction": {
+          "enum": [
+            "in",
+            "out"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mime": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "mime",
+              "path"
+            ]
+          }
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "errand_id",
+        "type",
+        "prev_hash",
+        "direction",
+        "channel",
+        "message_id",
+        "text"
+      ]
+    }
+  }
+}

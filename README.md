@@ -4,7 +4,7 @@ A personal agent that does real errands, built only from parts the person owns o
 
 This is a reference implementation. Today's personal agents are captive: the platform holds the credentials, the context and the history. This one shows the alternative, in code small enough to read.
 
-**Status: pre-alpha.** The contracts are being written. Nothing runs yet.
+**Status: pre-alpha.** Contracts v0.1-draft are in [`contracts/`](contracts/). Nothing runs yet.
 
 ## The parts
 

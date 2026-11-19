@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/browser-worker.schema.json",
+  "title": "Browser worker (0.1-draft)",
+  "$defs": {
+    "page": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "screenshot_png_b64": {
+          "type": "string",
+          "contentEncoding": "base64"
+        }
+      },
+      "required": [
+        "url",
+        "title",
+        "text"
+      ]
+    },
+    "browser.open.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "grant_id",
+        "url"
+      ]
+    },
+    "browser.open.result": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      },
+      "required": [
+        "session_id",
+        "page"
+      ]
+    },
+    "browser.act.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "click",
+            "type",
+            "select",
+            "scroll",
+            "wait"
+          ]
+        },
+        "target": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "book_grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        }
+      },
+      "required": [
+        "grant_id",
+        "session_id",
+        "action",
+        "target"
+      ]
+    },
+    "browser.act.result": {
+      "type": "object",
+      "properties": {
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      },
+      "required": [
+        "page"
+      ]
+    },
+    "browser.fill_login.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "credential": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "session_id",
+        "credential"
+      ]
+    },
+    "browser.fill_login.result": {
+      "type": "object",
+      "properties": {
+        "filled": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "filled"
+      ]
+    },
+    "browser.close.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "session_id"
+      ]
+    },
+    "browser.close.result": {
+      "type": "object",
+      "properties": {}
+    },
+    "errors": {
+      "enum": [
+        "session_not_found",
+        "navigation_failed",
+        "blocked_by_site",
+        "target_not_found",
+        "origin_mismatch",
+        "secret_value_refused",
+        "constraint_mismatch",
+        "unauthorized_caller"
+      ]
+    }
+  }
+}
