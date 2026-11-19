@@ -1,0 +1,17 @@
+{
+  "name": "@open-personal-agent/fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stand-ins for every part, per contracts v0.1-draft. No network, no account, no secret.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "errand": "node errand/run.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
+  }
+}

@@ -1,0 +1,145 @@
+// Browser worker fixture (contracts/browser-worker.md). A tiny HTTP "browser" that
+// drives plain-HTML sites (the fake booking site). It follows links, fills and submits
+// forms, keeps cookies, and masks anything filled from the store. The broker calls it
+// in-process after checking grants; it is never reached by the core directly.
+import { ContractError } from '../lib/wire.js';
+
+const decode = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+const strip = (html) => decode(html.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+const BINDING = /complete reservation|pay now|book now|place order/i;
+
+export class BrowserWorker {
+  /**
+   * store: CredentialStore. getBookGrant(id) -> grant or null (provided by the broker).
+   * userAgent: honest by default; the fixture never pretends to be a person.
+   */
+  constructor({ store, getBookGrant, userAgent = 'open-personal-agent-fixture/0.1 (automation)', mode = 'agent_browser' }) {
+    this.store = store;
+    this.getBookGrant = getBookGrant;
+    this.ua = userAgent;
+    this.mode = mode;
+    this.sessions = new Map();
+    this.n = 0;
+  }
+
+  #session(id) {
+    const s = this.sessions.get(id);
+    if (!s) throw new ContractError('session_not_found', id);
+    return s;
+  }
+
+  async #fetch(s, url, init = {}) {
+    let target = new URL(url, s.url || undefined).toString();
+    for (let hop = 0; hop < 5; hop++) {
+      const res = await fetch(target, {
+        ...init, redirect: 'manual',
+        headers: { 'user-agent': this.ua, cookie: [...s.cookies].map(([k, v]) => `${k}=${v}`).join('; '), ...(init.headers || {}) },
+      }).catch((e) => { throw new ContractError('navigation_failed', e.message); });
+      for (const c of res.headers.getSetCookie?.() || []) {
+        const [kv] = c.split(';'); const i = kv.indexOf('=');
+        s.cookies.set(kv.slice(0, i).trim(), kv.slice(i + 1).trim());
+      }
+      if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+        target = new URL(res.headers.get('location'), target).toString();
+        init = {};
+        continue;
+      }
+      const html = await res.text();
+      s.url = target; s.html = html; s.form = {}; s.status = res.status;
+      if (res.status === 403) {
+        throw new ContractError('blocked_by_site', `403 at ${target}: ${/<title>(.*?)<\/title>/.exec(html)?.[1] || ''}`);
+      }
+      return;
+    }
+    throw new ContractError('navigation_failed', 'too many redirects');
+  }
+
+  #page(s) {
+    let text = strip(s.html.replace(/<title>.*?<\/title>/s, ''));
+    for (const v of s.masked) text = text.split(v).join('••••');
+    return { url: s.url, title: /<title>(.*?)<\/title>/s.exec(s.html)?.[1] || '', text };
+  }
+
+  async open({ url }) {
+    const id = `s${++this.n}`;
+    const s = { url: null, html: '', cookies: new Map(), form: {}, masked: new Set() };
+    this.sessions.set(id, s);
+    await this.#fetch(s, url);
+    return { session_id: id, page: this.#page(s) };
+  }
+
+  #inputForLabel(s, label) {
+    const re = new RegExp(`<label>\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<input[^>]*name="([^"]+)"`, 'i');
+    return re.exec(s.html)?.[1] || (/^[a-z_]+$/.test(label) && s.html.includes(`name="${label}"`) ? label : null);
+  }
+
+  /** Values of the form containing the button labelled `label`, plus typed values. */
+  #formFor(s, label) {
+    for (const m of s.html.matchAll(/<form([^>]*)>([\s\S]*?)<\/form>/g)) {
+      const [, attrs, inner] = m;
+      if (!new RegExp(`<button>\\s*${label}\\s*</button>`, 'i').test(inner)) continue;
+      const method = /method="(\w+)"/i.exec(attrs)?.[1]?.toUpperCase() || 'GET';
+      const action = /action="([^"]*)"/i.exec(attrs)?.[1] || s.url;
+      const fields = {};
+      for (const h of inner.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[h[1]] = decode(h[2]);
+      for (const i of inner.matchAll(/<input[^>]*name="([^"]+)"/g)) if (s.form[i[1]] !== undefined) fields[i[1]] = s.form[i[1]];
+      return { method, action, fields };
+    }
+    return null;
+  }
+
+  #checkBooking(s, bookGrantId) {
+    const g = bookGrantId && this.getBookGrant(bookGrantId);
+    if (!g) throw new ContractError('constraint_mismatch', 'binding click needs an approved one-shot book grant');
+    const shown = (id) => decode(new RegExp(`<dd id="${id}">([^<]*)</dd>`).exec(s.html)?.[1] || '');
+    const c = g.constraints;
+    const ok = shown('venue') === c.venue && shown('date') === c.date && shown('time') === c.time && Number(shown('party_size')) === c.party_size;
+    if (!ok) throw new ContractError('constraint_mismatch', `page shows ${shown('venue')} ${shown('date')} ${shown('time')} x${shown('party_size')}`);
+    return g;
+  }
+
+  async act({ session_id, action, target, value, book_grant_id }) {
+    const s = this.#session(session_id);
+    let binding = null;
+    if (action === 'type' || action === 'select') {
+      if (this.store.allSecretValues().includes(value)) throw new ContractError('secret_value_refused', 'use browser.fill_login');
+      const name = this.#inputForLabel(s, target);
+      if (!name) throw new ContractError('target_not_found', target);
+      s.form[name] = value;
+    } else if (action === 'click') {
+      const link = [...s.html.matchAll(/<a href="([^"]+)">([^<]*)<\/a>/g)].find((m) => decode(m[2]).trim() === target);
+      if (link) {
+        await this.#fetch(s, decode(link[1]));
+      } else {
+        const f = this.#formFor(s, target);
+        if (!f) throw new ContractError('target_not_found', target);
+        if (BINDING.test(target)) binding = this.#checkBooking(s, book_grant_id);
+        const qs = new URLSearchParams(f.fields).toString();
+        if (f.method === 'POST') {
+          await this.#fetch(s, f.action, { method: 'POST', body: qs, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+        } else {
+          await this.#fetch(s, `${f.action}${f.action.includes('?') ? '&' : '?'}${qs}`);
+        }
+      }
+    } else if (!['scroll', 'wait'].includes(action)) {
+      throw new ContractError('bad_request', `unknown action ${action}`);
+    }
+    return { page: this.#page(s), binding };
+  }
+
+  async fill_login({ session_id, credential }) {
+    const s = this.#session(session_id);
+    const c = await this.store.get(credential);
+    if (!c) throw new ContractError('credential_not_found', credential);
+    if (new URL(s.url).origin !== c.record.origin) throw new ContractError('origin_mismatch', `${new URL(s.url).origin} is not ${c.record.origin}`);
+    let filled = 0;
+    if (s.html.includes('name="username"')) { s.form.username = c.record.username; filled++; }
+    if (/type="password"/.test(s.html)) {
+      const name = /<input[^>]*name="([^"]+)"[^>]*type="password"/.exec(s.html)?.[1] || 'password';
+      s.form[name] = c.secret.reveal(); s.masked.add(c.secret.reveal()); filled++;
+    }
+    return { filled };
+  }
+
+  async close({ session_id }) { this.sessions.delete(session_id); return {}; }
+}
