@@ -1,6 +1,6 @@
 # Router contract (inference)
 
-**0.1-draft.** Gets a reply from whichever model is configured. The core speaks one small, neutral format, and the router translates it for each provider. The provider account's credential lives in the router, never in the core.
+**0.2-draft.** Gets a reply from whichever model is configured. The core speaks one small, neutral format, and the router translates it for each provider. The provider account's credential lives in the router, never in the core.
 
 ## Transport
 

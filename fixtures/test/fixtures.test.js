@@ -8,8 +8,9 @@ import path from 'node:path';
 import { runErrand, startAll, checkedCall, violations } from '../errand/run.js';
 import { call, request, ulid } from '../lib/wire.js';
 import { verifyAll } from '../history/history.js';
-import { startSite } from '../site/server.js';
+import { startSite, FIXTURE_USER, ORDER_DEADLINE } from '../site/server.js';
 import { BrowserWorker } from '../browser-worker/worker.js';
+import { PERSON } from '../channel/terminal.js';
 import { FixtureCredentialStore } from '../store/fixture-store.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'opa-test-'));
@@ -19,7 +20,7 @@ async function withEnv(fn) {
   const env = await startAll(tmp());
   try { return await fn(env); } finally { await env.stop(); }
 }
-const B = (env, op, args, errandId = ulid()) => checkedCall(env.sock('broker'), op, 'core', errandId, args);
+const B = (env, op, args, errandId = ulid()) => checkedCall(env.sock('broker-core'), op, 'core', errandId, args);
 async function approvedGrant(env, args) {
   const r = await B(env, 'grant.request', args);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -127,13 +128,108 @@ test('context: denylisted items never come back, unknown scopes are refused, rea
   assert.equal(verifyAll(env.dir).context.lines, 1);
 }));
 
-test('channel: only the allowlisted sender reaches the core; sends to others are refused', () => withEnv(async (env) => {
-  assert.equal(await env.channel.inbound('hi', 'stranger@fixture'), null);
-  assert.equal(env.channel.dropped, 1);
+test('channel: nothing is forwarded or sent before pairing, and the code works once', () => withEnv(async (env) => {
+  const ch = env.channel;
+  assert.equal(await ch.inbound('hello', PERSON), null);
+  const early = await checkedCall(env.sock('channel'), 'channel.send', 'core', ulid(), { channel: 'terminal', to: PERSON.account, text: 'x' });
+  assert.equal(early.error, 'not_paired');
+  assert.equal(await ch.inbound(ch.pairingCode, PERSON), 'paired');
+  assert.equal(ch.sender, PERSON.account);
+  const thief = { account: 'acct-stranger', key: 'idkey-stranger', display: 'Person' };
+  assert.equal(await ch.inbound(ch.pairingCode, thief), null, 'a spent code pairs no one');
   assert.equal(env.inbox.length, 0);
-  const r = await checkedCall(env.sock('channel'), 'channel.send', 'core', ulid(), { channel: 'terminal', to: 'stranger@fixture', text: 'x' });
+}));
+
+test('channel: only the paired account with its pinned key reaches the core; a copied display name does not', () => withEnv(async (env) => {
+  const ch = env.channel;
+  await ch.inbound(ch.pairingCode, PERSON);
+  assert.equal(await ch.inbound('what is my order?', { account: 'acct-stranger', key: 'idkey-x', display: PERSON.display }), null);
+  assert.equal(await ch.inbound('what is my order?', { ...PERSON, key: 'idkey-new-phone' }), null);
+  assert.equal(ch.identityChanged, 1);
+  assert.equal(env.inbox.length, 0);
+  await ch.inbound('what is my order?', PERSON);
+  assert.equal(env.inbox.length, 1);
+  assert.equal(env.inbox[0].from, PERSON.account);
+  assert.equal(env.inbox[0].from_display, 'Person');
+  const r = await checkedCall(env.sock('channel'), 'channel.send', 'core', ulid(), { channel: 'terminal', to: 'acct-stranger', text: 'x' });
   assert.equal(r.error, 'recipient_not_allowed');
 }));
+
+test('broker: the socket is the caller; another caller on the core socket is refused', () => withEnv(async (env) => {
+  const r = await checkedCall(env.sock('broker-core'), 'status', 'channel-terminal', null, {});
+  assert.equal(r.error, 'unauthorized_caller');
+  assert.equal((await B(env, 'status', {})).ok, true);
+}));
+
+test('broker: a grant names a credential or a session, not both; edit_order is binding', () => withEnv(async (env) => {
+  const session = { origin: env.site.origin, browser: 'operator' };
+  const both = await B(env, 'grant.request', { credential: 'fake-table', session, ops: ['read'], constraints: {}, mode: 'standing', ttl_seconds: 600, purpose: 'x' });
+  assert.equal(both.error, 'bad_request');
+  const edit = await B(env, 'grant.request', { session, ops: ['edit_order'], constraints: { changes: [{ item: 'yogurt', quantity: 2 }] }, mode: 'standing', ttl_seconds: 600, purpose: 'x' });
+  assert.equal(edit.error, 'one_shot_required');
+}));
+
+test('read errand: the person signs in themselves, the agent reads the order and its deadline, and cannot change it', () => withEnv(async (env) => {
+  const { site, channel } = env;
+  violations.length = 0; // earlier tests send deliberately bad requests
+  await channel.inbound(channel.pairingCode, PERSON);
+  await channel.inbound('What do I have coming this week, and until when can I change it?', PERSON);
+  const ask = env.inbox.shift();
+  const errand = ulid();
+  const Be = (op, args) => B(env, op, args, errand);
+
+  const g = await approvedGrant(env, { session: { origin: site.origin, browser: 'operator' }, ops: ['read', 'login'], constraints: { scope: 'orders' }, mode: 'standing', ttl_seconds: 3600, purpose: 'Read your upcoming order' });
+  const o = await Be('browser.open', { grant_id: g, url: `${site.origin}/account/order`, read_only: true });
+  assert.equal(o.result.page.title, 'Sign in');
+  const s = o.result.session_id;
+
+  // The agent asks the person to sign in; they do, from their own password manager.
+  await checkedCall(env.sock('channel'), 'channel.send', 'core', errand, { channel: 'terminal', to: ask.from, text: 'Please sign in to the shop on your Mac.' });
+  const waiting = Be('browser.await_login', { grant_id: g, session_id: s, timeout_seconds: 5 });
+  await env.broker.worker.operatorSignIn(s, FIXTURE_USER);
+  assert.deepEqual((await waiting).result, { logged_in: true, login_mode: 'operator_filled' });
+
+  const order = await Be('browser.extract', { grant_id: g, session_id: s, target: 'Upcoming order' });
+  assert.equal(order.ok, true, JSON.stringify(order));
+  assert.match(order.result.page.text, /Plain Yogurt 750g x 1/);
+  assert.match(order.result.page.text, /Total \$28\.27/);
+  assert.ok(!order.result.page.text.includes('Burrito'), 'promotions are outside the region');
+  assert.deepEqual(order.result.page.notices, [ORDER_DEADLINE]);
+
+  // Every edit to a standing order is binding; a read-only session can't make one.
+  const plus = await Be('browser.act', { grant_id: g, session_id: s, action: 'click', target: 'Add one Plain Yogurt 750g' });
+  assert.equal(plus.error, 'read_only_session');
+  assert.equal(site.order.find((i) => i.id === 'yogurt').qty, 1);
+  // Links still work.
+  assert.equal((await Be('browser.act', { grant_id: g, session_id: s, action: 'click', target: 'View order' })).ok, true);
+
+  // The grant is held to its origin, and there is no credential to fill.
+  assert.equal((await Be('browser.open', { grant_id: g, url: 'http://127.0.0.1:1/' })).error, 'origin_mismatch');
+  assert.equal((await Be('browser.fill_login', { grant_id: g, session_id: s, credential: 'fake-table' })).error, 'op_not_granted');
+
+  const reply = `This week: delivery 2026-12-01, 12:00 to 18:00, 4 items, $28.27. ${order.result.page.notices[0]}; you can change it until then.`;
+  await checkedCall(env.sock('channel'), 'channel.send', 'core', errand, { channel: 'terminal', to: ask.from, text: reply });
+  assert.match(channel.outbox.at(-1).text, /16:00 on 2026-11-30/);
+
+  // When the grant ends, so does the session, whatever the cookies say.
+  await Be('grant.revoke', { grant_id: g, reason: 'errand done' });
+  assert.equal((await Be('browser.extract', { grant_id: g, session_id: s, target: 'Upcoming order' })).error, 'grant_revoked');
+  const actions = fs.readFileSync(path.join(env.dir, 'actions.jsonl'), 'utf8');
+  assert.match(actions, /"type":"browser.closed_on_grant_end"/);
+  assert.match(actions, /"login_mode":"operator_filled"/);
+  assert.match(actions, /"mode":"operator_browser"/);
+  assert.ok(!actions.includes(FIXTURE_USER.password));
+  assert.deepEqual(violations.filter((v) => !v.startsWith('infer')), []);
+}));
+
+test('browser: a read-only session refuses typing', async () => {
+  const site = await startSite();
+  const w = new BrowserWorker({ store: new FixtureCredentialStore(), getBookGrant: () => null });
+  try {
+    const { session_id } = await w.open({ url: site.origin + '/', read_only: true });
+    await assert.rejects(w.act({ session_id, action: 'type', target: 'Where', value: 'x' }), { code: 'read_only_session' });
+  } finally { await site.close(); }
+});
 
 test('router: unknown logical model is refused', () => withEnv(async (env) => {
   const res = await fetch(env.router.url, { method: 'POST', body: JSON.stringify(request('infer', 'core', ulid(), { model: 'gpt-whatever', messages: [] })) });
@@ -141,8 +237,8 @@ test('router: unknown logical model is refused', () => withEnv(async (env) => {
 }));
 
 test('envelope: unknown ops and broken envelopes get the common errors', () => withEnv(async (env) => {
-  assert.equal((await call(env.sock('broker'), request('grant.mint', 'core', null, {}))).error, 'unknown_op');
-  assert.equal((await call(env.sock('broker'), { op: 'status' })).error, 'bad_request');
+  assert.equal((await call(env.sock('broker-core'), request('grant.mint', 'core', null, {}))).error, 'unknown_op');
+  assert.equal((await call(env.sock('broker-core'), { op: 'status' })).error, 'bad_request');
 }));
 
 test('history: tampering with a log is detected', async () => {

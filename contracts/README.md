@@ -1,6 +1,6 @@
 # Contracts
 
-**Version 0.1-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
+**Version 0.2-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
 
 | Seam | Contract | Schema | Served by |
 |---|---|---|---|
@@ -17,7 +17,7 @@
 ### Transport
 
 - **One JSON object per line** (UTF-8, `\n`-terminated) over a **Unix domain socket**. One request per connection: connect, write one line, read one line, close.
-- Sockets live under a runtime directory set in each part's config. The socket file is mode `0660`, and its group is the set of parts allowed to call it.
+- Sockets live under a runtime directory set in each part's config. The socket file is mode `0660`, and its group is the set of parts allowed to call it. A seam that must know exactly who is calling (the broker) gives each caller its own socket.
 - **Exceptions:**
   - The router speaks the same JSON over loopback HTTP (`POST /infer`), so off-the-shelf HTTP tooling works.
   - A part on another machine (for example, a browser worker on the operator's laptop) is reached through an authenticated tunnel the deployment provides. The contract doesn't change.
@@ -38,7 +38,7 @@ Every request:
 | `errand_id` | A ULID minted by the core when an errand starts. Present on everything done for that errand. `null` only for housekeeping (`status`) |
 | `ts` | RFC 3339 UTC time |
 | `args` | Op-specific, defined in each contract |
-| `sig` | Optional. A signature over the request, where a seam requires proof of caller (see [broker.md](broker.md#caller-proof)) |
+| `sig` | Optional. A signature over the request, used where a call crosses machines (the broker signing calls to a remote browser worker). Local callers are proven by which socket they use (see [broker.md](broker.md#caller-proof)) |
 
 Every response is one of:
 

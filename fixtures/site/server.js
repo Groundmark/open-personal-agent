@@ -10,6 +10,17 @@ export const RESTAURANTS = [
 ];
 const SLOTS = ['17:30', '18:00', '19:00', '19:30', '20:30'];
 const USER = { username: 'diner@example.test', password: 'FIXTURE-pa55word-not-real' };
+/** The person's own login, for fixtures standing in for them signing in (operator_browser). */
+export const FIXTURE_USER = { ...USER };
+
+// A standing order, like a grocery subscription: it checks out on a schedule, so any edit is binding.
+const ORDER_ITEMS = () => [
+  { id: 'yogurt', name: 'Plain Yogurt 750g', price: 7.49, qty: 1 },
+  { id: 'eggs', name: 'Eggs (dozen)', price: 6.99, qty: 1 },
+  { id: 'bread', name: 'Sourdough Loaf', price: 8.50, qty: 1 },
+  { id: 'oatmilk', name: 'Oat Milk 1.75L', price: 5.29, qty: 1 },
+];
+export const ORDER_DEADLINE = 'Automatic checkout at 16:00 on 2026-11-30';
 
 const page = (title, body) => `<!doctype html><html><head><title>${title}</title></head><body><h1>${title}</h1>${body}</body></html>`;
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -17,6 +28,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 export function startSite({ port = 0, blockAutomation = false } = {}) {
   const sessions = new Map(); // sid -> { user }
   const bookings = [];
+  const order = ORDER_ITEMS();
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -79,12 +91,29 @@ export function startSite({ port = 0, blockAutomation = false } = {}) {
       bookings.push({ conf, venue: r?.name, date: f.date, time: f.time, party_size: Number(f.covers), user: sess.user });
       return send(200, page('Reservation confirmed', `<p>Confirmation <strong id="conf">${conf}</strong>: ${esc(r?.name)}, ${esc(f.date)} at ${esc(f.time)}, ${esc(f.covers)} people.</p>`));
     }
+    if (req.method === 'GET' && url.pathname === '/account/order') {
+      if (!sess) return send(303, '', { location: '/login?next=' + encodeURIComponent(req.url) });
+      const total = order.reduce((t, i) => t + i.price * i.qty, 0).toFixed(2);
+      return send(200, page('Your account', `<p role="status">${ORDER_DEADLINE}</p>
+        <section id="promos"><h2>This week's deals</h2><ul><li>Chorizo and Egg Burrito $8.04</li><li>Peppermint Brownies $11.04</li><li>Za'atar Hummus $6.29</li></ul></section>
+        <section id="order"><h2>Upcoming order</h2><p>Delivery 2026-12-01, 12:00 to 18:00</p><ul>` + order.map((i) => `<li>${esc(i.name)} x ${i.qty} $${i.price.toFixed(2)}
+          <form method="post" action="/order/qty"><input type="hidden" name="item" value="${i.id}"><input type="hidden" name="delta" value="1"><button>Add one ${esc(i.name)}</button></form>
+          <form method="post" action="/order/qty"><input type="hidden" name="item" value="${i.id}"><input type="hidden" name="delta" value="-1"><button>Remove one ${esc(i.name)}</button></form></li>`).join('')
+        + `</ul><p>Total $${total}</p></section><p><a href="/account/order">View order</a></p>`));
+    }
+    if (req.method === 'POST' && url.pathname === '/order/qty') {
+      if (!sess) return send(401, page('Sign in required', ''));
+      const f = await body();
+      const it = order.find((i) => i.id === f.item);
+      if (it) it.qty = Math.max(0, it.qty + Number(f.delta));
+      return send(303, '', { location: '/account/order' });
+    }
     send(404, page('Not found', ''));
   });
 
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => {
     const origin = `http://127.0.0.1:${server.address().port}`;
-    resolve({ server, origin, bookings, close: () => new Promise((r) => { server.close(r); server.closeAllConnections(); }) });
+    resolve({ server, origin, bookings, order, close: () => new Promise((r) => { server.close(r); server.closeAllConnections(); }) });
   }));
 }
 

@@ -73,7 +73,7 @@ export async function startAll(dir) {
     store, logPath: path.join(dir, 'actions.jsonl'),
     onGrantEvent: (grant_id, state) => checkedCall(sock('core'), 'grant.event', 'broker', null, { grant_id, state }),
   });
-  const brokerServer = await broker.listen(sock('broker'));
+  const brokerServer = await broker.listen(sock('broker-core'));
   const context = new ContextFixture({ logPath: path.join(dir, 'context-reads.jsonl') });
   const contextServer = await context.listen(sock('context'));
   const channel = new TerminalChannel({ coreSocket: sock('core'), print: false });
@@ -99,7 +99,7 @@ export async function startAll(dir) {
 export async function standInCore(env, { log = () => {} } = {}) {
   const { sock, site, channel, router, inbox, waitFor, dir } = env;
   const conv = new Log(path.join(dir, 'conversation.jsonl'));
-  const B = (op, args) => checkedCall(sock('broker'), op, 'core', errandId, args).then((r) => {
+  const B = (op, args) => checkedCall(sock('broker-core'), op, 'core', errandId, args).then((r) => {
     if (!r.ok) throw new Error(`${op} failed: ${r.error} ${r.message}`);
     return r.result;
   });
@@ -109,6 +109,9 @@ export async function standInCore(env, { log = () => {} } = {}) {
     conv.append({ errand_id: errandId, type: 'message', direction: 'out', channel: 'terminal', message_id: r.result.message_id, text, attachments: [] });
     log(`agent>  ${text}`);
   };
+
+  // 0. The person pairs their account with the code the installer showed them.
+  if (!channel.pairing) await channel.inbound(channel.pairingCode);
 
   // 1. The person asks.
   await channel.inbound('Book a table for 2 at Casa Verde on 2026-12-04 at 19:00, please.');

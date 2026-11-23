@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/broker.schema.json",
-  "title": "Broker: credentials, grants, identity (0.1-draft)",
+  "title": "Broker: credentials, grants, identity (0.2-draft)",
   "$defs": {
     "grant_state": {
       "enum": [
@@ -50,8 +50,16 @@
         },
         "ops": {
           "type": "array",
+          "minItems": 1,
           "items": {
-            "type": "string"
+            "enum": [
+              "read",
+              "search",
+              "login",
+              "book",
+              "edit_order",
+              "pay"
+            ]
           }
         },
         "constraints": {
@@ -70,10 +78,12 @@
         },
         "purpose": {
           "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/operator_session"
         }
       },
       "required": [
-        "credential",
         "ops",
         "constraints",
         "mode",
@@ -103,6 +113,73 @@
                 "$ref": "#/$defs/book_constraints"
               }
             }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ops": {
+                "contains": {
+                  "const": "edit_order"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "one_shot"
+              },
+              "ttl_seconds": {
+                "maximum": 3600
+              },
+              "constraints": {
+                "$ref": "#/$defs/edit_order_constraints"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ops": {
+                "contains": {
+                  "const": "pay"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "one_shot"
+              },
+              "ttl_seconds": {
+                "maximum": 3600
+              }
+            }
+          }
+        }
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "credential"
+          ],
+          "not": {
+            "required": [
+              "session"
+            ]
+          }
+        },
+        {
+          "required": [
+            "session"
+          ],
+          "not": {
+            "required": [
+              "credential"
+            ]
           }
         }
       ]
@@ -274,7 +351,6 @@
       "properties": {
         "purpose": {
           "enum": [
-            "caller_proof",
             "declaration",
             "http_request"
           ]
@@ -406,6 +482,66 @@
         "broker_kid"
       ]
     },
+    "edit_order_constraints": {
+      "type": "object",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "item": {
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "item",
+                  "quantity"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "skip": {
+                    "type": "string",
+                    "format": "date"
+                  }
+                },
+                "required": [
+                  "skip"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "changes"
+      ]
+    },
+    "operator_session": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "format": "uri"
+        },
+        "browser": {
+          "const": "operator"
+        }
+      },
+      "required": [
+        "origin",
+        "browser"
+      ]
+    },
     "errors": {
       "enum": [
         "grant_not_found",
@@ -417,6 +553,7 @@
         "op_not_granted",
         "constraint_mismatch",
         "one_shot_required",
+        "origin_mismatch",
         "credential_not_found",
         "store_unavailable",
         "upstream_error",

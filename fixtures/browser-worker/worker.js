@@ -54,18 +54,65 @@ export class BrowserWorker {
     throw new ContractError('navigation_failed', 'too many redirects');
   }
 
-  #page(s) {
-    let text = strip(s.html.replace(/<title>.*?<\/title>/s, ''));
+  #mask(s, text) {
     for (const v of s.masked) text = text.split(v).join('••••');
-    return { url: s.url, title: /<title>(.*?)<\/title>/s.exec(s.html)?.[1] || '', text };
+    return text;
   }
 
-  async open({ url }) {
+  #page(s, html = s.html) {
+    const text = this.#mask(s, strip(html.replace(/<title>.*?<\/title>/s, '')));
+    const notices = [...s.html.matchAll(/<[a-z]+[^>]*role="status"[^>]*>([\s\S]*?)<\/[a-z]+>/g)].map((m) => this.#mask(s, strip(m[1])));
+    return { url: s.url, title: /<title>(.*?)<\/title>/s.exec(s.html)?.[1] || '', text, ...(notices.length ? { notices } : {}) };
+  }
+
+  async open({ url, read_only = false, grant_id = null }) {
     const id = `s${++this.n}`;
-    const s = { url: null, html: '', cookies: new Map(), form: {}, masked: new Set() };
+    const s = { url: null, html: '', cookies: new Map(), form: {}, masked: new Set(), readOnly: read_only, grantId: grant_id, operatorSignedIn: false };
     this.sessions.set(id, s);
     await this.#fetch(s, url);
     return { session_id: id, page: this.#page(s) };
+  }
+
+  /** One region of the page: a <section> by id, aria-label or heading text. */
+  async extract({ session_id, target }) {
+    const s = this.#session(session_id);
+    for (const m of s.html.matchAll(/<section([^>]*)>([\s\S]*?)<\/section>/g)) {
+      const [, attrs, inner] = m;
+      const heading = strip(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/.exec(inner)?.[1] || '');
+      if (attrs.includes(`id="${target}"`) || attrs.includes(`aria-label="${target}"`) || heading === target) {
+        return { page: this.#page(s, inner) };
+      }
+    }
+    throw new ContractError('target_not_found', target);
+  }
+
+  /**
+   * Stands in for the person signing in themselves in their own browser, from their own
+   * password manager. The agent's side never sees the values: tests pass them straight here.
+   */
+  async operatorSignIn(session_id, { username, password }) {
+    const s = this.#session(session_id);
+    const next = /name="next" value="([^"]*)"/.exec(s.html)?.[1];
+    const body = new URLSearchParams({ username, password, ...(next ? { next: decode(next) } : {}) }).toString();
+    await this.#fetch(s, '/login', { method: 'POST', body, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    s.operatorSignedIn = true;
+  }
+
+  async await_login({ session_id, timeout_seconds }) {
+    const s = this.#session(session_id);
+    const until = Date.now() + timeout_seconds * 1000;
+    while (!s.operatorSignedIn) {
+      if (Date.now() > until) throw new ContractError('login_timeout', `no sign-in within ${timeout_seconds}s`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return { logged_in: true, login_mode: 'operator_filled' };
+  }
+
+  /** Close every session opened under a grant that has ended. Returns how many. */
+  closeForGrant(grantId) {
+    let n = 0;
+    for (const [id, s] of this.sessions) if (s.grantId === grantId) { this.sessions.delete(id); n++; }
+    return n;
   }
 
   #inputForLabel(s, label) {
@@ -101,6 +148,9 @@ export class BrowserWorker {
   async act({ session_id, action, target, value, book_grant_id }) {
     const s = this.#session(session_id);
     let binding = null;
+    if (s.readOnly && (action === 'type' || action === 'select')) {
+      throw new ContractError('read_only_session', `${action} is not allowed in a read-only session`);
+    }
     if (action === 'type' || action === 'select') {
       if (this.store.allSecretValues().includes(value)) throw new ContractError('secret_value_refused', 'use browser.fill_login');
       const name = this.#inputForLabel(s, target);
@@ -113,6 +163,7 @@ export class BrowserWorker {
       } else {
         const f = this.#formFor(s, target);
         if (!f) throw new ContractError('target_not_found', target);
+        if (s.readOnly) throw new ContractError('read_only_session', `"${target}" submits a form`);
         if (BINDING.test(target)) binding = this.#checkBooking(s, book_grant_id);
         const qs = new URLSearchParams(f.fields).toString();
         if (f.method === 'POST') {

@@ -1,6 +1,6 @@
 # History contract (logs)
 
-**0.1-draft.** What the agent did, what it read and what was said: three append-only logs, kept separate, joined by `errand_id`. All three are readable with every part stopped.
+**0.2-draft.** What the agent did, what it read and what was said: three append-only logs, kept separate, joined by `errand_id`. All three are readable with every part stopped.
 
 ## The three logs
 
@@ -14,7 +14,7 @@ Every line has `seq` (monotonic per log), `ts`, `errand_id`, `type` and `prev_ha
 
 ### `actions.jsonl` types
 
-`grant.requested`, `grant.approved` (includes the passkey credential id and the bound hash), `grant.denied`, `grant.used` (op, a summary of the arguments, the result status, the browser `mode` if any), `grant.refused` (error code), `grant.revoked`, `grant.expired`, `identity.declaration` (the declaration and `presented: true|false`).
+`grant.requested`, `grant.approved` (includes the passkey credential id and the bound hash), `grant.denied`, `grant.used` (op, a summary of the arguments, the result status, and for browser ops `mode`, `login_mode` and `conforming`), `grant.refused` (error code), `grant.revoked`, `grant.expired`, `browser.closed_on_grant_end`, `identity.declaration` (the declaration and `presented: true|false`).
 
 ### `conversation.jsonl`
 
@@ -27,6 +27,8 @@ Every line has `seq` (monotonic per log), `ts`, `errand_id`, `type` and `prev_ha
 - `history errands`: lists errands with start time, outcome and the channels used.
 
 ## Rules
+
+- **Granularity.** Under a standing grant, `grant.used` is written once per `browser.open`, `browser.extract`, login and binding act, not for every click or scroll. Binding acts are always logged one by one.
 
 - Append only. A correction is a new line that refers to the old one.
 - Secrets never appear. Argument summaries are written by the broker, which knows what's secret.

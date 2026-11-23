@@ -1,6 +1,6 @@
 # Context gateway contract (personal context)
 
-**0.1-draft.** Answers questions about the person, one named slice (a **scope**) at a time, and records every read. The store behind it is swappable. The first is a Postgres + pgvector thought store.
+**0.2-draft.** Answers questions about the person, one named slice (a **scope**) at a time, and records every read. The store behind it is swappable. The first is a Postgres + pgvector thought store.
 
 ## Operations
 
