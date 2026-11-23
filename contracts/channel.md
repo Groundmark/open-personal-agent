@@ -34,6 +34,15 @@ The adapter forwards only messages from a **paired** account. Pairing ties the p
 
 Pairing state is plain JSON in the adapter's config directory: `{ channel, account_id, identity_key, paired_at }`. Deleting it unpairs.
 
+### Tracking pairing for the person
+
+A new phone silences the agent until the person pairs again. That's deliberate, so the person must be able to see it happening.
+
+- **Every pairing event goes in the history log,** as a line in `conversation.jsonl` with `type: "pairing"`: `paired`, `identity_changed` (with the old and new key fingerprints), `code_issued`, `code_expired`, `unpaired`. `history show` lists them.
+- **The adapter keeps counters:** messages dropped from strangers, and from the paired account under a changed key. It reports them in `status`.
+- **After a re-pair, the agent's first message says so,** for example: "Paired again. While we were unpaired, 3 messages from your account were dropped." The person learns what they missed.
+- **A host running agents for many people** surfaces `identity_changed` to that person by another route it already has (email, its dashboard). The agent itself can't reach them on the channel it has just stopped trusting.
+
 ## Rules
 
 - **The agent may speak first.** `channel.send` needs no preceding inbound message. It goes only to the paired account (`recipient_not_allowed` otherwise).

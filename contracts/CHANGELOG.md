@@ -7,6 +7,8 @@ From the first live errand: a read-only spike against a real grocery subscriptio
 ### Broker
 
 - **Caller proof, fixed (breaking).** It now uses one socket per caller: the socket a request arrives on is the caller, and `SO_PEERCRED` is an optional second check. `identity.sign` no longer offers `caller_proof`. The envelope's `sig` is now for calls that cross machines.
+  - **How only the caller can open its socket is up to the deployment:** separate Unix users, systemd `DynamicUser=`, or a container per part.
+  - **A host running many agents isolates each person first.** Separating parts within one agent is the second layer.
 - **Operator sessions.** A grant names either a `credential` or a `session: { origin, browser: "operator" }`: a site the person is signed in to in their own browser, for which the broker holds no secret.
 - **New ops.**
   - `read`: the person's own account data, standing-grant eligible. A grant allowing only `read` forces read-only browser sessions.
@@ -30,6 +32,7 @@ From the first live errand: a read-only spike against a real grocery subscriptio
   - `from` and `to` are the channel's stable account id. Signal hides phone numbers by default, so the person's message arrived with none.
   - `from_display` carries the self-chosen profile name, which never decides anything.
 - **Pairing.** A one-time code shown at install pins one account id and its identity key. An identity-key change stops forwarding until re-paired. New error `not_paired`.
+- **Pairing is tracked for the person.** Pairing events go into `conversation.jsonl` as `type: "pairing"`, and the adapter counts dropped messages. After a re-pair the agent says what was dropped. A multi-person host tells the person about `identity_changed` by another route.
 - **One adapter owns the account.** For Signal, a second `receive` steals messages.
 
 ### Core and history

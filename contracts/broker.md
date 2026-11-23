@@ -96,7 +96,11 @@ args `{}` → result `{ "version", "store", "agent_kid", "broker_kid" }`
 
 **0.1 had the core sign its requests with the agent key, which the broker holds. That proved nothing: anyone who could reach the socket could ask the broker for the signature.** 0.2 proves the caller with the operating system instead:
 
-- **One socket per caller.** The broker listens on a separate socket for each part allowed to call it: `broker-core.sock`, `broker-channel-signal.sock`, and so on. Each socket file is owned by the broker and readable and writable only by that caller's Unix user (mode `0600`, or `0660` with a group holding only that user).
+- **One socket per caller.** The broker listens on a separate socket for each part allowed to call it: `broker-core.sock`, `broker-channel-signal.sock`, and so on. **The deployment must make sure only that caller can open its socket.** The contract doesn't fix how. Any of these will do:
+  - **Separate Unix users,** with each socket `0600` to its caller. This suits a single person's agent on their own machine.
+  - **systemd `DynamicUser=`,** which gives each service its own uid automatically, with no accounts to create or manage.
+  - **One container or sandbox per part,** with each socket mounted only into its caller's container. This suits a host running many people's agents.
+- **Isolation between people comes first.** On a host running many agents, every person's parts and sockets live in that person's own sandbox. Separating parts within one agent is the second layer: it keeps a compromised core away from the broker's secrets.
 - **The socket is the caller.** The broker takes the caller from the socket the request arrived on. If the envelope's `caller` field differs, it refuses with `unauthorized_caller`.
 - **Peer credentials are a second check, where available.** On Linux the broker may also read `SO_PEERCRED` and refuse a peer whose uid isn't the one configured for that socket.
 - **Remote parts** (a browser worker on the person's laptop) are reached the other way round: the broker signs each call with the **broker** key, and the worker verifies it. That signature is real proof, because only the broker holds the key.

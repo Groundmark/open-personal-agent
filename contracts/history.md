@@ -20,6 +20,8 @@ Every line has `seq` (monotonic per log), `ts`, `errand_id`, `type` and `prev_ha
 
 `{ seq, ts, errand_id, type: "message", direction: "in" | "out", channel, message_id, text, attachments }`
 
+Pairing events ([channel.md](channel.md#tracking-pairing-for-the-person)) go here too: `{ seq, ts, errand_id: null, type: "pairing", channel, event, old_key?, new_key? }`.
+
 ## Tools (`parts/history`)
 
 - `history show <errand_id>`: merges the three logs by time into one readable story.
