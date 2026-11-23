@@ -1,6 +1,6 @@
 # Channel contract (front end)
 
-**0.2-draft.** Where the person talks to the agent. Every front end (Signal first, iMessage next, a terminal for tests) speaks the same two messages, so swapping one changes nothing else.
+**0.3-draft.** Where the person talks to the agent. Every front end (Signal first, iMessage next, a terminal for tests) speaks the same two messages, so swapping one changes nothing else.
 
 ## Messages
 
@@ -42,6 +42,17 @@ A new phone silences the agent until the person pairs again. That's deliberate, 
 - **The adapter keeps counters:** messages dropped from strangers, and from the paired account under a changed key. It reports them in `status`.
 - **After a re-pair, the agent's first message says so,** for example: "Paired again. While we were unpaired, 3 messages from your account were dropped." The person learns what they missed.
 - **A host running agents for many people** surfaces `identity_changed` to that person by another route it already has (email, its dashboard). The agent itself can't reach them on the channel it has just stopped trusting.
+
+## One-time codes
+
+When a site sends the person a code (SMS, email), the code comes back over the channel, but it must not reach the core or the model.
+
+- **The broker opens a code slot** ([broker.md](broker.md#browserfill_code)) and tells the adapter: `{ slot_id, account_id, expires_at }`, on the adapter's own broker socket.
+- **While a slot is open, the adapter checks the paired person's messages.** If one is only a code (4 to 10 letters and digits, optionally with spaces or dashes, which it strips), the adapter sends it to the broker with `code.deliver` instead of `channel.inbound`.
+  - It forwards a placeholder to the core instead: `text: "[one-time code delivered]"`.
+  - That placeholder is all that reaches `conversation.jsonl`.
+- **Anything else is forwarded as usual,** and the slot stays open until it's filled or expires. A message such as "the code is 123456" doesn't count as a code. The core asks again for the code on its own.
+- **Codes never touch disk on the adapter's side,** and never appear in its logs or `status`.
 
 ## Rules
 

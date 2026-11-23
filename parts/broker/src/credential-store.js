@@ -21,6 +21,22 @@ export class CredentialStore {
   async get(ref) {
     throw new Error('CredentialStore.get is not implemented');
   }
+  // How the store asks the person, if at all (contracts/broker.md): 'none' | 'device_local' | 'remote'.
+  get approval() {
+    return 'none';
+  }
+}
+
+// A store failure as the seam reports it (contracts/broker.md, Store seam):
+//   not_found    no such item, or the person refused it on the store's own prompt
+//   no_answer    the store asked the person and nobody answered in time
+//   unavailable  the store or its provider can't be reached
+// The message never contains secret material.
+export class StoreError extends Error {
+  constructor(kind, message) {
+    super(message || kind);
+    this.kind = kind;
+  }
 }
 
 const REDACTED = '[secret]';

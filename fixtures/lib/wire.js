@@ -76,7 +76,7 @@ export async function dispatch(handlers, req, opts = {}) {
     if (opts.authorize) await opts.authorize(req);
     return { id, ok: true, result: (await h(req.args, req)) ?? {} };
   } catch (e) {
-    if (e instanceof ContractError) return { id, ok: false, error: e.code, message: e.message };
+    if (e instanceof ContractError) return { id, ok: false, error: e.code, message: e.message, ...(e.detail ? { detail: e.detail } : {}) };
     return { id, ok: false, error: 'internal', message: String(e.message || e) };
   }
 }

@@ -88,6 +88,10 @@
         },
         "message": {
           "type": "string"
+        },
+        "detail": {
+          "type": "object",
+          "description": "Structured detail for some errors, for example credential_ambiguous: { usernames }. Never secrets."
         }
       },
       "required": [

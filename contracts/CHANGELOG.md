@@ -1,5 +1,71 @@
 # Contracts changelog
 
+## 0.3-draft, 2026-11-23
+
+From a live test of fetching a login from the person's own password manager (Bitwarden Agent Access against a self-hosted Vaultwarden, dummy items only), and from comparing how shipped personal agents handle logins.
+
+### Broker
+
+- **Credentials by site.** `credential` may be `{ domain, username? }`: "my login for this site", with nothing registered first.
+  - The store matches the domain the way a password manager matches a page.
+  - Several matches give `credential_ambiguous`, with the usernames in the error's `detail`.
+  - The grant binds to the item it finds (`credential_ref`), and browsing is held to that site.
+- **Stores that ask the person themselves.**
+  - A store reports `approval: none | device_local | remote`.
+  - A `device_local` store (one that prompts on the person's computer) can only be used with `operator_present: true`. Otherwise the broker refuses with `store_needs_operator`.
+  - The grant stays the binding limit: a store's own approval cache never extends it.
+- **Failures a person's vault can give:**
+  - `credential_not_found`: absent, or refused on the vault's prompt. Some vaults can't tell these apart.
+  - `store_no_answer`: nobody answered the prompt.
+  - `store_unavailable`: the vault can't be reached.
+
+  Never retried automatically.
+- **One-time codes:** `browser.fill_code` with `source: store_totp | person`.
+  - A code from the person goes through a **code slot**: the channel adapter hands it to the broker with `code.deliver`. That op is only on adapters' sockets, so the core and the model never see the code.
+  - New error: `code_timeout`.
+- **Store seam:** `find` (list matches without fetching) and `fetch` (stores that only release one login per request) join `get`.
+  - The store's client state (pairing keys, caches) must be the broker's alone: `0600` in a `0700` directory.
+  - **New in `parts/broker`:** `AgentAccessStore`.
+
+### Browser worker
+
+- `browser.fill_code`: origin-bound and masked like `fill_login`.
+- `fill_login` takes no `credential` under a credential-by-site grant.
+
+### Channel
+
+- **One-time codes:** while a slot is open, a message that is only a code goes to the broker, and the core gets `[one-time code delivered]`.
+
+### Core and history
+
+- **Core:**
+  - new tools `sign_in_with_saved_login` and `enter_code`
+  - rules: codes are never the model's; a refused login is final for the errand; set `operator_present` only when the person said they're at the computer
+- **History:**
+  - codes never appear in any log
+  - logins from a store that asks the person record `store_approval` and the outcome
+
+### Envelope
+
+- An error response may carry `detail` (an object, never a secret) where a contract says so.
+
+### Fixtures
+
+- 25 tests (7 new): credentials by site, ambiguity, `store_needs_operator`, refusal without retry, `store_no_answer`, a stored TOTP, and a code from the person through the channel.
+- `parts/broker` has 21 tests, 3 of them new for `AgentAccessStore` against a fake `aac`: exit codes, no secret in errors, and it refuses world-readable state.
+
+### Still open for 0.4
+
+- **How long a login approval lasts. Decided: stay at 7 days.** Standing grants, `login`-only included, keep the 7-day cap while the project is scaling up. Shipped agents allow 30 days per site; revisit once there's a track record.
+- **One tap, not two. Goal: one tap.** With a vault that prompts on its own, the person approves twice: the passkey on the grant, then the vault's prompt. One tap is the target. For now:
+  - stores with `approval: none` (the `bw serve` store below) already need only the passkey;
+  - `device_local` stores (Agent Access) keep both taps until there's a provider that can take the broker's approval as its own.
+- **Background errands with a personal vault. Decided: a narrow `bw serve` store for recurring errands.** A `device_local` store can't serve them. Recurring errands the person sets up in advance (a weekly shopping order, say) get logins from a separate `bw serve` account that can see only a chosen collection. Agent Access stays the route for one-off sign-ins with the person at the computer. To settle before building it:
+  - what may go in the collection (logins only; no payment cards, no email or bank logins);
+  - whether checkout on a recurring errand still needs a fresh one-shot grant.
+- **Sign-in links** sent by email: like codes, but they're links. Does the same slot carry them?
+- From 0.2: read-only enforcement in `operator_browser` mode; a Playwright worker fixture and an MCP wire fixture; which op a non-final, state-changing click on an ordinary site needs.
+
 ## 0.2-draft, 2026-11-23
 
 From the first live errand: a read-only spike against a real grocery subscription site. The person texted the agent on Signal, signed in themselves in their own Chrome, the agent read the upcoming order through the browser, and replied over Signal. These changes are what that errand showed the contracts were missing.

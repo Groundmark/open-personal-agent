@@ -4,7 +4,9 @@
 import crypto from 'node:crypto';
 import { ContractError, ulid, nowIso, canonical, serve } from '../lib/wire.js';
 import { Log, newKeyPair, signB64 } from '../lib/log.js';
+import { Secret } from '../store/fixture-store.js';
 import { BrowserWorker } from '../browser-worker/worker.js';
+import { StoreError, hostMatches } from '../store/fixture-store.js';
 
 const MAX_TTL = { standing: 7 * 24 * 3600, one_shot: 3600 };
 const BINDING_OPS = new Set(['book', 'edit_order', 'pay']);
@@ -42,6 +44,8 @@ export class BrokerFixture {
     this.approveDelayMs = approveDelayMs;
     this.onGrantEvent = onGrantEvent;
     this.grants = new Map();
+    this.codeSlots = new Map(); // slot_id -> { session_id, resolve, timer }
+    this.onCodeSlot = () => {}; // how the channel adapter hears a slot opened (code_slot.opened)
     this.worker = new BrowserWorker({ store, mode: browserMode, getBookGrant: (id) => this.#usableBookGrant(id) });
   }
 
@@ -74,9 +78,29 @@ export class BrokerFixture {
     return g;
   }
 
+  /** Store failures, mapped to the broker's errors (contracts/broker.md, Store seam). */
+  #storeError(e) {
+    if (!(e instanceof StoreError)) return e;
+    return new ContractError({ not_found: 'credential_not_found', no_answer: 'store_no_answer', unavailable: 'store_unavailable' }[e.kind], e.message);
+  }
+
+  /** The login behind a credential-by-site grant. Fetch-only stores ask the person here; the grant binds to the first item. */
+  async #siteLogin(g) {
+    let c;
+    if (g.credential_ref && this.store.find) c = await this.store.get(g.credential_ref);
+    else {
+      try { c = await this.store.fetch({ domain: g.domain, username: g.credential.username }); } catch (e) { throw this.#storeError(e); }
+    }
+    if (!c) throw new ContractError('credential_not_found', g.domain);
+    if (g.credential_ref && c.record.ref !== g.credential_ref) throw new ContractError('constraint_mismatch', 'the store returned a different login than this grant is bound to');
+    g.credential_ref = c.record.ref;
+    return c;
+  }
+
   /** The origin a grant's browser sessions are held to. */
   async #origin(g) {
     if (g.session) return new URL(g.session.origin).origin;
+    if (g.domain) return { host: g.domain };
     const c = await this.store.get(g.credential);
     return c?.record.origin ? new URL(c.record.origin).origin : null;
   }
@@ -117,7 +141,22 @@ export class BrokerFixture {
     return {
       'grant.request': async (a, req) => {
         if (!!a.credential === !!a.session) throw new ContractError('bad_request', 'exactly one of credential or session');
-        if (a.credential && !(await this.store.get(a.credential))) throw new ContractError('credential_not_found', a.credential);
+        const bySite = a.credential && typeof a.credential === 'object';
+        if (a.credential && this.store.approval === 'device_local' && !a.operator_present) {
+          throw new ContractError('store_needs_operator', 'this store asks the person on their computer; they must be at it (operator_present)');
+        }
+        let credential_ref = null, found = null;
+        if (bySite && this.store.find) {
+          const m = await this.store.find(a.credential);
+          if (!m.length) throw new ContractError('credential_not_found', a.credential.domain);
+          if (m.length > 1) {
+            const e = new ContractError('credential_ambiguous', `${m.length} logins for ${a.credential.domain}: ${m.map((x) => x.record.username).join(', ')}`);
+            e.detail = { usernames: m.map((x) => x.record.username) };
+            throw e;
+          }
+          [found] = m; credential_ref = found.ref;
+        }
+        if (a.credential && !bySite && !(await this.store.get(a.credential))) throw new ContractError('credential_not_found', a.credential);
         if (a.session) {
           try { new URL(a.session.origin); } catch { throw new ContractError('bad_request', 'session.origin is not a URL'); }
           if (a.session.browser !== 'operator') throw new ContractError('bad_request', 'session.browser must be "operator"');
@@ -130,19 +169,22 @@ export class BrokerFixture {
         }
         if (a.ops.includes('edit_order') && !(a.constraints?.changes?.length)) throw new ContractError('bad_request', 'edit_order needs constraints.changes');
         const grant_id = ulid();
-        const target = a.credential ?? `your signed-in ${new URL(a.session.origin).host} session`;
+        const target = bySite
+          ? (found ? `your login ${found.record.username} for ${a.credential.domain}` : `a login for ${a.credential.domain} from your vault (your vault will ask you which)`)
+          : a.credential ?? `your signed-in ${new URL(a.session.origin).host} session`;
         const summary = a.ops.includes('book')
           ? `Book ${a.constraints.venue}, ${a.constraints.date} at ${a.constraints.time}, ${a.constraints.party_size} people, using ${target}.`
           : `Let the agent ${a.ops.join(' and ')} with ${target} for ${Math.round(a.ttl_seconds / 3600)} h: ${a.purpose}`;
         const g = {
-          grant_id, errand_id: req.errand_id, credential: a.credential ?? null, session: a.session ?? null, ops: a.ops, constraints: a.constraints, mode: a.mode,
+          grant_id, errand_id: req.errand_id, credential: a.credential ?? null, session: a.session ?? null,
+          domain: bySite ? a.credential.domain : null, credential_ref, operator_present: !!a.operator_present, ops: a.ops, constraints: a.constraints, mode: a.mode,
           ttl_seconds: a.ttl_seconds, purpose: a.purpose, state: 'pending', uses: 0, approved_at: null, expires_at: null, last_used_at: null,
         };
         g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode })).digest('hex');
         this.grants.set(grant_id, g);
         this.log.append({ errand_id: req.errand_id, type: 'grant.requested', grant_id, detail: { credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, purpose: a.purpose } });
         if (this.autoApprove) setTimeout(() => this.approve(grant_id), this.approveDelayMs);
-        return { grant_id, state: 'pending', approve_url: `http://127.0.0.1/approve/${grant_id}`, summary };
+        return { grant_id, state: 'pending', approve_url: `http://127.0.0.1/approve/${grant_id}`, summary, ...(credential_ref ? { credential_ref } : {}) };
       },
 
       'grant.status': async ({ grant_id }) => {
@@ -184,7 +226,9 @@ export class BrokerFixture {
         try {
           g = this.#requireUsable(a.grant_id, BROWSE_OPS);
           const origin = await this.#origin(g);
-          if (origin && new URL(a.url).origin !== origin) throw new ContractError('origin_mismatch', `${new URL(a.url).origin} is outside this grant (${origin})`);
+          const u = new URL(a.url);
+          const inside = !origin || (typeof origin === 'string' ? u.origin === origin : hostMatches(u.hostname, origin.host));
+          if (!inside) throw new ContractError('origin_mismatch', `${u.origin} is outside this grant (${origin.host ?? origin})`);
           // A grant that only allows reading opens read-only sessions, whatever the caller asked.
           if (!g.ops.includes('search') && !g.ops.includes('login')) read_only = true;
         } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
@@ -227,11 +271,54 @@ export class BrokerFixture {
       'browser.fill_login': async (a, req) => {
         try {
           const g = this.#requireUsable(a.grant_id, 'login');
+          if (g.domain) {
+            const store_approval = this.store.approval;
+            let c;
+            try { c = await this.#siteLogin(g); } catch (e) {
+              if (store_approval !== 'none') this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail: { op: 'login', domain: g.domain, store_approval, status: e.code === 'store_no_answer' ? 'no_answer' : 'not_found' } });
+              throw e;
+            }
+            const r = await this.worker.fill_login({ ...a, credential: c.record.ref });
+            this.#consume(g, { op: 'login', domain: g.domain, credential_ref: c.record.ref, login_mode: 'broker_filled', store_approval, mode: this.#mode(g), conforming: true, status: 'ok' });
+            return r;
+          }
           if (g.credential !== a.credential) throw new ContractError('op_not_granted', `grant is for ${g.credential}`);
           const r = await this.worker.fill_login(a);
           this.#consume(g, { op: 'login', credential: a.credential, login_mode: 'broker_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+      },
+
+      'browser.fill_code': async (a, req) => {
+        let g;
+        try { g = this.#requireUsable(a.grant_id, 'login'); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+        let code;
+        if (a.source === 'store_totp') {
+          const ref = g.credential_ref ?? g.credential;
+          code = ref && this.store.totp ? await this.store.totp(ref) : null;
+          if (!code) throw this.#refuse(req.errand_id, a.grant_id, new ContractError('op_not_granted', 'this login has no TOTP in the store'));
+        } else {
+          if ([...this.codeSlots.values()].some((s) => s.session_id === a.session_id)) throw new ContractError('bad_request', 'a code slot is already open for this session');
+          const slot_id = ulid();
+          const ms = (a.timeout_seconds ?? 300) * 1000;
+          code = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new ContractError('code_timeout', 'no code from the person')); }, ms);
+            this.codeSlots.set(slot_id, { session_id: a.session_id, resolve, timer });
+            this.onCodeSlot({ slot_id, account_id: 'paired', expires_at: new Date(Date.now() + ms).toISOString() });
+          }).catch((e) => { throw this.#refuse(req.errand_id, a.grant_id, e); });
+        }
+        const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
+        this.#consume(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
+        return r;
+      },
+
+      'code.deliver': async ({ slot_id, code }) => {
+        const s = this.codeSlots.get(slot_id);
+        if (!s) throw new ContractError('bad_request', 'no open code slot ' + slot_id);
+        this.codeSlots.delete(slot_id);
+        clearTimeout(s.timer);
+        s.resolve(new Secret(code));
+        return { accepted: true };
       },
 
       'browser.close': async (a) => this.worker.close(a),
@@ -261,6 +348,8 @@ export class BrokerFixture {
     return serve(socketPath, this.handlers(), {
       authorize: (req) => {
         if (req.caller !== caller) throw new ContractError('unauthorized_caller', `this socket is for ${caller}, not ${req.caller}`);
+        // code.deliver is for channel adapters only (contracts/broker.md).
+        if (req.op === 'code.deliver' && !caller.startsWith('channel-')) throw new ContractError('unauthorized_caller', 'code.deliver is served only on channel adapters\' sockets');
       },
     });
   }

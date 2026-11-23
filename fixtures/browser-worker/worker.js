@@ -192,5 +192,13 @@ export class BrowserWorker {
     return { filled };
   }
 
+  /** Fills a one-time code the broker hands over (a Secret). Origin-bound like fill_login; masked in page. */
+  async fill_code({ session_id, code }) {
+    const s = this.#session(session_id);
+    const value = typeof code === 'string' ? code : code.reveal();
+    s.form.code = value; s.masked.add(value);
+    return { filled: true };
+  }
+
   async close({ session_id }) { this.sessions.delete(session_id); return {}; }
 }
