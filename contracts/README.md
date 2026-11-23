@@ -1,6 +1,6 @@
 # Contracts
 
-**Version 0.2-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
+**Version 0.3-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
 
 | Seam | Contract | Schema | Served by |
 |---|---|---|---|
@@ -48,6 +48,7 @@ Every response is one of:
 ```
 
 - `error` is from a **closed list** in each contract.
+- An error may carry `detail`, an object, where a contract says so (for example `credential_ambiguous` lists the usernames). Never a secret.
 - Every seam also allows these common errors: `bad_request` (doesn't match the schema), `unknown_op`, `unauthorized_caller`, `internal`.
 
 ### Rules

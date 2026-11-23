@@ -46,7 +46,15 @@
       "type": "object",
       "properties": {
         "credential": {
-          "type": "string"
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "$ref": "#/$defs/credential_by_site"
+            }
+          ]
         },
         "ops": {
           "type": "array",
@@ -81,6 +89,10 @@
         },
         "session": {
           "$ref": "#/$defs/operator_session"
+        },
+        "operator_present": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -199,6 +211,9 @@
           "format": "uri"
         },
         "summary": {
+          "type": "string"
+        },
+        "credential_ref": {
           "type": "string"
         }
       },
@@ -555,9 +570,93 @@
         "one_shot_required",
         "origin_mismatch",
         "credential_not_found",
+        "credential_ambiguous",
         "store_unavailable",
+        "code_timeout",
+        "store_needs_operator",
+        "store_no_answer",
         "upstream_error",
         "approval_timeout"
+      ]
+    },
+    "credential_by_site": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "domain"
+      ],
+      "additionalProperties": false
+    },
+    "code.deliver.args": {
+      "type": "object",
+      "properties": {
+        "slot_id": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{4,10}$"
+        }
+      },
+      "required": [
+        "slot_id",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "code.deliver.result": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "const": true
+        }
+      },
+      "required": [
+        "accepted"
+      ]
+    },
+    "code_slot.opened": {
+      "description": "Broker to channel adapter: a code slot is open for the paired account.",
+      "type": "object",
+      "properties": {
+        "slot_id": {
+          "type": "string"
+        },
+        "account_id": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "slot_id",
+        "account_id",
+        "expires_at"
+      ]
+    },
+    "credential_ambiguous.detail": {
+      "type": "object",
+      "properties": {
+        "usernames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "usernames"
       ]
     }
   }

@@ -131,9 +131,9 @@
       },
       "required": [
         "grant_id",
-        "session_id",
-        "credential"
-      ]
+        "session_id"
+      ],
+      "description": "credential is required for a grant on a named credential; omit it for a credential-by-site grant (the broker uses the grant's item)."
     },
     "browser.fill_login.result": {
       "type": "object",
@@ -247,6 +247,71 @@
         "unauthorized_caller",
         "read_only_session",
         "login_timeout"
+      ]
+    },
+    "browser.fill_code.args": {
+      "type": "object",
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{4,10}$"
+        },
+        "source": {
+          "enum": [
+            "store_totp",
+            "person"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900
+        }
+      },
+      "required": [
+        "grant_id",
+        "session_id"
+      ],
+      "description": "Core to broker: { grant_id, session_id, source, timeout_seconds? }. Broker to worker: { grant_id, session_id, code }.",
+      "oneOf": [
+        {
+          "required": [
+            "source"
+          ],
+          "not": {
+            "required": [
+              "code"
+            ]
+          }
+        },
+        {
+          "required": [
+            "code"
+          ],
+          "not": {
+            "required": [
+              "source"
+            ]
+          }
+        }
+      ]
+    },
+    "browser.fill_code.result": {
+      "type": "object",
+      "properties": {
+        "filled": {
+          "const": true
+        }
+      },
+      "required": [
+        "filled"
       ]
     }
   }
