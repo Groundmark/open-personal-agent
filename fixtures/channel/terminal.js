@@ -48,6 +48,9 @@ export class TerminalChannel {
    * Returns 'paired' for an accepted pairing code, the core's response for a forwarded
    * message, or null if dropped.
    */
+  /** The broker opened a code slot for the paired account (code_slot.opened). */
+  openCodeSlot(slot) { this.codeSlot = slot; }
+
   async inbound(text, who = PERSON) {
     if (!this.pairing) {
       if (!this.codeSpent && text.trim() === this.pairingCode) {
@@ -61,6 +64,17 @@ export class TerminalChannel {
     }
     if (who.account !== this.pairing.account_id) { this.dropped += 1; return null; }
     if (who.key !== this.pairing.identity_key) { this.identityChanged += 1; this.dropped += 1; return null; }
+    // One-time codes (contracts/channel.md): while a slot is open, a message that is only a code goes to the
+    // broker, and the core gets a placeholder. Codes are never stored or logged here.
+    if (this.codeSlot && this.brokerSocket) {
+      const code = text.replace(/[\s-]/g, '');
+      if (Date.parse(this.codeSlot.expires_at) < Date.now()) this.codeSlot = null;
+      else if (/^[A-Za-z0-9]{4,10}$/.test(code)) {
+        const slot = this.codeSlot; this.codeSlot = null;
+        await call(this.brokerSocket, request('code.deliver', `channel-${this.name}`, null, { slot_id: slot.slot_id, code }));
+        text = '[one-time code delivered]';
+      }
+    }
     const args = { channel: this.name, message_id: `in-${ulid()}`, from: who.account, from_display: who.display, text, attachments: [], received_at: nowIso() };
     return call(this.coreSocket, request('channel.inbound', `channel-${this.name}`, null, args));
   }

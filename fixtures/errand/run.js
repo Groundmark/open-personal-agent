@@ -54,12 +54,12 @@ export const SCRIPT = [
 ];
 
 /** Start every fixture in `dir`. Returns handles and a stop() function. */
-export async function startAll(dir) {
+export async function startAll(dir, { storeOpts } = {}) {
   // Unix socket paths are limited to ~104-108 bytes; use a short directory if `dir` is long.
   const sockDir = path.join(dir, 'x.sock').length > 100 ? fs.mkdtempSync('/tmp/opa-') : dir;
   const sock = (n) => path.join(sockDir, `${n}.sock`);
   const site = await startSite();
-  const store = new FixtureCredentialStore();
+  const store = new FixtureCredentialStore({}, storeOpts);
   store.setOrigin('fake-table', site.origin);
 
   const waiters = new Map();
@@ -74,9 +74,12 @@ export async function startAll(dir) {
     onGrantEvent: (grant_id, state) => checkedCall(sock('core'), 'grant.event', 'broker', null, { grant_id, state }),
   });
   const brokerServer = await broker.listen(sock('broker-core'));
+  const brokerChannelServer = await broker.listen(sock('broker-channel-terminal'), { caller: 'channel-terminal' });
   const context = new ContextFixture({ logPath: path.join(dir, 'context-reads.jsonl') });
   const contextServer = await context.listen(sock('context'));
   const channel = new TerminalChannel({ coreSocket: sock('core'), print: false });
+  channel.brokerSocket = sock('broker-channel-terminal');
+  broker.onCodeSlot = (slot) => channel.openCodeSlot(slot);
   const channelServer = await channel.listen(sock('channel'));
   const router = await startRouter({ script: SCRIPT });
 
@@ -88,7 +91,7 @@ export async function startAll(dir) {
 
   const waitFor = (grantId) => new Promise((resolve) => waiters.set(grantId, resolve));
   const stop = async () => {
-    for (const s of [coreServer, brokerServer, contextServer, channelServer]) s.close();
+    for (const s of [coreServer, brokerServer, brokerChannelServer, contextServer, channelServer]) s.close();
     await router.close(); await site.close();
     if (sockDir !== dir) fs.rmSync(sockDir, { recursive: true, force: true });
   };

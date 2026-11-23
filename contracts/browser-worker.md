@@ -24,8 +24,9 @@ All take `grant_id`, which the broker has already checked and passes through for
 | `browser.open` | `{ grant_id, url, read_only? }` | `{ session_id, page }` |
 | `browser.act` | `{ grant_id, session_id, action, target, value?, book_grant_id? }` | `{ page }` |
 | `browser.extract` | `{ grant_id, session_id, target }` | `{ page }`, covering only that region |
-| `browser.fill_login` | `{ grant_id, session_id, credential }` | `{ filled: <number of fields> }` |
+| `browser.fill_login` | `{ grant_id, session_id, credential? }`; omit `credential` under a credential-by-site grant, where the broker uses the grant's item | `{ filled: <number of fields> }` |
 | `browser.await_login` | `{ grant_id, session_id, timeout_seconds }` | `{ logged_in: true, login_mode: "operator_filled" }` |
+| `browser.fill_code` | `{ grant_id, session_id, code }` (from the broker only, which got the code from the store or a code slot) | `{ filled: true }` |
 | `browser.close` | `{ grant_id, session_id }` | `{}` |
 
 - `action` is one of `click`, `type`, `select`, `scroll`, `wait`.
@@ -37,6 +38,7 @@ All take `grant_id`, which the broker has already checked and passes through for
 
 ## Signing in
 
+- **`fill_code` is bound to the origin too,** and the code is masked in `page` like any filled secret. The worker never sees where the code came from and never returns it.
 - **`fill_login` is bound to the origin.** It's refused unless the page's origin matches the credential's recorded origin.
 - **`await_login` is for the person signing in themselves.** The core tells them over the channel to sign in on the device that runs the browser. The worker then waits until the page shows a signed-in state, or until `timeout_seconds` passes (`login_timeout`). The secret never enters the agent's side, not even the broker. Use it when the person would rather fill from their own password manager, and whenever the broker holds no credential for the site.
 - **`type` refuses values that match any secret** the store holds for the grant's credential.

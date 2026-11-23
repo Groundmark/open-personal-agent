@@ -1,6 +1,6 @@
 # History contract (logs)
 
-**0.2-draft.** What the agent did, what it read and what was said: three append-only logs, kept separate, joined by `errand_id`. All three are readable with every part stopped.
+**0.3-draft.** What the agent did, what it read and what was said: three append-only logs, kept separate, joined by `errand_id`. All three are readable with every part stopped.
 
 ## The three logs
 
@@ -34,6 +34,8 @@ Pairing events ([channel.md](channel.md#tracking-pairing-for-the-person)) go her
 
 - Append only. A correction is a new line that refers to the old one.
 - Secrets never appear. Argument summaries are written by the broker, which knows what's secret.
+- **One-time codes never appear in any log.** `grant.used` for `browser.fill_code` records `source` and the status, never the code. In `conversation.jsonl` a delivered code is the placeholder `[one-time code delivered]`.
+- **The store's own prompts are logged as outcomes.** `grant.used` for a login from a store that asks the person carries `store_approval: "device_local" | "remote"` and the result (`ok`, `not_found`, `no_answer`).
 - The log files live on the person's own machine, under their control, in plain JSONL.
 
 ## Fixture
