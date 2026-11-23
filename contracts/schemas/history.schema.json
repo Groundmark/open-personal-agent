@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/history.schema.json",
-  "title": "History: log lines (0.1-draft)",
+  "title": "History: log lines (0.2-draft)",
   "$defs": {
     "action_line": {
       "type": "object",
@@ -34,6 +34,7 @@
             "grant.refused",
             "grant.revoked",
             "grant.expired",
+            "browser.closed_on_grant_end",
             "identity.declaration"
           ]
         },
@@ -145,7 +146,10 @@
           ]
         },
         "type": {
-          "const": "message"
+          "enum": [
+            "message",
+            "pairing"
+          ]
         },
         "prev_hash": {
           "type": "string",
@@ -187,6 +191,21 @@
               "path"
             ]
           }
+        },
+        "event": {
+          "enum": [
+            "paired",
+            "identity_changed",
+            "code_issued",
+            "code_expired",
+            "unpaired"
+          ]
+        },
+        "old_key": {
+          "type": "string"
+        },
+        "new_key": {
+          "type": "string"
         }
       },
       "required": [
@@ -195,10 +214,39 @@
         "errand_id",
         "type",
         "prev_hash",
-        "direction",
-        "channel",
-        "message_id",
-        "text"
+        "channel"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "message"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "direction",
+              "message_id",
+              "text"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "pairing"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "event"
+            ]
+          }
+        }
       ]
     }
   }

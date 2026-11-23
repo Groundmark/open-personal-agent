@@ -7,7 +7,8 @@ import { Log, newKeyPair, signB64 } from '../lib/log.js';
 import { BrowserWorker } from '../browser-worker/worker.js';
 
 const MAX_TTL = { standing: 7 * 24 * 3600, one_shot: 3600 };
-const BINDING_OPS = new Set(['book', 'pay']);
+const BINDING_OPS = new Set(['book', 'edit_order', 'pay']);
+const BROWSE_OPS = ['read', 'search'];
 
 /** A fake reservations MCP server: tools and the op each maps to. */
 export const FAKE_MCP = {
@@ -52,17 +53,35 @@ export class BrokerFixture {
     if (g.state === 'approved' && g.expires_at && Date.parse(g.expires_at) < Date.now()) {
       g.state = 'expired';
       this.log.append({ errand_id: g.errand_id, type: 'grant.expired', grant_id: g.grant_id });
+      this.#endSessions(g);
     }
     return g;
   }
 
-  #requireUsable(id, op) {
+  /** A session lives no longer than its grant. */
+  #endSessions(g) {
+    const n = this.worker.closeForGrant(g.grant_id);
+    if (n) this.log.append({ errand_id: g.errand_id, type: 'browser.closed_on_grant_end', grant_id: g.grant_id, detail: { sessions: n, state: g.state } });
+  }
+
+  /** ops: one op, or a list of which any one will do. */
+  #requireUsable(id, ops) {
     const g = this.#grant(id);
     const bad = { pending: 'grant_not_approved', denied: 'grant_denied', expired: 'grant_expired', revoked: 'grant_revoked', consumed: 'grant_consumed' }[g.state];
     if (bad) throw new ContractError(bad, `${id} is ${g.state}`);
-    if (op && !g.ops.includes(op)) throw new ContractError('op_not_granted', `${op} not in [${g.ops}]`);
+    const want = ops ? [].concat(ops) : [];
+    if (want.length && !want.some((o) => g.ops.includes(o))) throw new ContractError('op_not_granted', `${want.join('|')} not in [${g.ops}]`);
     return g;
   }
+
+  /** The origin a grant's browser sessions are held to. */
+  async #origin(g) {
+    if (g.session) return new URL(g.session.origin).origin;
+    const c = await this.store.get(g.credential);
+    return c?.record.origin ? new URL(c.record.origin).origin : null;
+  }
+
+  #mode(g) { return g.session ? 'operator_browser' : this.worker.mode; }
 
   #usableBookGrant(id) {
     try { return this.#requireUsable(id, 'book'); } catch { return null; }
@@ -97,24 +116,31 @@ export class BrokerFixture {
   handlers() {
     return {
       'grant.request': async (a, req) => {
-        if (!(await this.store.get(a.credential))) throw new ContractError('credential_not_found', a.credential);
+        if (!!a.credential === !!a.session) throw new ContractError('bad_request', 'exactly one of credential or session');
+        if (a.credential && !(await this.store.get(a.credential))) throw new ContractError('credential_not_found', a.credential);
+        if (a.session) {
+          try { new URL(a.session.origin); } catch { throw new ContractError('bad_request', 'session.origin is not a URL'); }
+          if (a.session.browser !== 'operator') throw new ContractError('bad_request', 'session.browser must be "operator"');
+        }
         if (a.ops.some((o) => BINDING_OPS.has(o)) && a.mode !== 'one_shot') throw new ContractError('one_shot_required', 'binding ops need a one-shot grant');
         if (a.ttl_seconds > MAX_TTL[a.mode]) throw new ContractError('bad_request', `ttl over ${MAX_TTL[a.mode]}s for ${a.mode}`);
         if (a.ops.includes('book')) {
           const c = a.constraints || {};
           if (!c.venue || !c.date || !c.time || !c.party_size) throw new ContractError('bad_request', 'book needs venue, date, time, party_size');
         }
+        if (a.ops.includes('edit_order') && !(a.constraints?.changes?.length)) throw new ContractError('bad_request', 'edit_order needs constraints.changes');
         const grant_id = ulid();
+        const target = a.credential ?? `your signed-in ${new URL(a.session.origin).host} session`;
         const summary = a.ops.includes('book')
-          ? `Book ${a.constraints.venue}, ${a.constraints.date} at ${a.constraints.time}, ${a.constraints.party_size} people, using ${a.credential}.`
-          : `Let the agent ${a.ops.join(' and ')} with ${a.credential} for ${Math.round(a.ttl_seconds / 3600)} h: ${a.purpose}`;
+          ? `Book ${a.constraints.venue}, ${a.constraints.date} at ${a.constraints.time}, ${a.constraints.party_size} people, using ${target}.`
+          : `Let the agent ${a.ops.join(' and ')} with ${target} for ${Math.round(a.ttl_seconds / 3600)} h: ${a.purpose}`;
         const g = {
-          grant_id, errand_id: req.errand_id, credential: a.credential, ops: a.ops, constraints: a.constraints, mode: a.mode,
+          grant_id, errand_id: req.errand_id, credential: a.credential ?? null, session: a.session ?? null, ops: a.ops, constraints: a.constraints, mode: a.mode,
           ttl_seconds: a.ttl_seconds, purpose: a.purpose, state: 'pending', uses: 0, approved_at: null, expires_at: null, last_used_at: null,
         };
-        g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: a.credential, ops: a.ops, constraints: a.constraints, mode: a.mode })).digest('hex');
+        g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode })).digest('hex');
         this.grants.set(grant_id, g);
-        this.log.append({ errand_id: req.errand_id, type: 'grant.requested', grant_id, detail: { credential: a.credential, ops: a.ops, constraints: a.constraints, mode: a.mode, purpose: a.purpose } });
+        this.log.append({ errand_id: req.errand_id, type: 'grant.requested', grant_id, detail: { credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, purpose: a.purpose } });
         if (this.autoApprove) setTimeout(() => this.approve(grant_id), this.approveDelayMs);
         return { grant_id, state: 'pending', approve_url: `http://127.0.0.1/approve/${grant_id}`, summary };
       },
@@ -128,6 +154,7 @@ export class BrokerFixture {
         const g = this.#grant(grant_id);
         g.state = 'revoked';
         this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id, detail: { reason } });
+        this.#endSessions(g);
         return { grant_id, state: 'revoked' };
       },
 
@@ -153,14 +180,38 @@ export class BrokerFixture {
       },
 
       'browser.open': async (a, req) => {
-        try { this.#requireUsable(a.grant_id, 'search'); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
-        const r = await this.worker.open(a);
-        this.#consume(this.#grant(a.grant_id), { op: 'search', browser: 'open', url: a.url, mode: this.worker.mode, status: 'ok' });
+        let g, read_only = !!a.read_only;
+        try {
+          g = this.#requireUsable(a.grant_id, BROWSE_OPS);
+          const origin = await this.#origin(g);
+          if (origin && new URL(a.url).origin !== origin) throw new ContractError('origin_mismatch', `${new URL(a.url).origin} is outside this grant (${origin})`);
+          // A grant that only allows reading opens read-only sessions, whatever the caller asked.
+          if (!g.ops.includes('search') && !g.ops.includes('login')) read_only = true;
+        } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+        const r = await this.worker.open({ ...a, read_only, grant_id: g.grant_id });
+        const op = g.ops.includes('read') ? 'read' : 'search';
+        this.#consume(g, { op, browser: 'open', url: a.url, read_only, mode: this.#mode(g), conforming: true, status: 'ok' });
+        return r;
+      },
+
+      'browser.extract': async (a, req) => {
+        let g;
+        try { g = this.#requireUsable(a.grant_id, BROWSE_OPS); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+        const r = await this.worker.extract(a);
+        this.#consume(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'extract', target: a.target, mode: this.#mode(g), conforming: true, status: 'ok' });
+        return r;
+      },
+
+      'browser.await_login': async (a, req) => {
+        let g;
+        try { g = this.#requireUsable(a.grant_id, 'login'); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+        const r = await this.worker.await_login(a);
+        this.#consume(g, { op: 'login', login_mode: 'operator_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
         return r;
       },
 
       'browser.act': async (a, req) => {
-        try { this.#requireUsable(a.grant_id, 'search'); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
+        try { this.#requireUsable(a.grant_id, BROWSE_OPS); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
         let r;
         try { r = await this.worker.act(a); } catch (e) {
           if (e instanceof ContractError && e.code === 'constraint_mismatch') throw this.#refuse(req.errand_id, a.book_grant_id || a.grant_id, e);
@@ -178,7 +229,7 @@ export class BrokerFixture {
           const g = this.#requireUsable(a.grant_id, 'login');
           if (g.credential !== a.credential) throw new ContractError('op_not_granted', `grant is for ${g.credential}`);
           const r = await this.worker.fill_login(a);
-          this.#consume(g, { op: 'login', credential: a.credential, mode: this.worker.mode, status: 'ok' });
+          this.#consume(g, { op: 'login', credential: a.credential, login_mode: 'broker_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
       },
@@ -200,5 +251,17 @@ export class BrokerFixture {
     };
   }
 
-  listen(socketPath) { return serve(socketPath, this.handlers()); }
+  /**
+   * Caller proof (contracts/broker.md): one socket per caller. The socket a request
+   * arrives on is the caller; a different `caller` field is refused. A real broker also
+   * gives each socket file to that caller's Unix user (0600) and may check SO_PEERCRED;
+   * the fixture runs as one user, so it checks the field against the socket only.
+   */
+  listen(socketPath, { caller = 'core' } = {}) {
+    return serve(socketPath, this.handlers(), {
+      authorize: (req) => {
+        if (req.caller !== caller) throw new ContractError('unauthorized_caller', `this socket is for ${caller}, not ${req.caller}`);
+      },
+    });
+  }
 }

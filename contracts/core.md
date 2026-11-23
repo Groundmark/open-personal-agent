@@ -1,6 +1,6 @@
 # Core contract (the loop)
 
-**0.1-draft.** The agent itself: read the message, think, call the other parts, reply. It knows the other parts only through their contracts. **The target size is a few hundred lines.** If it grows past about 1,000, stop and ask why.
+**0.2-draft.** The agent itself: read the message, think, call the other parts, reply. It knows the other parts only through their contracts. **The target size is a few hundred lines.** If it grows past about 1,000, stop and ask why.
 
 ## What the core serves
 
@@ -20,8 +20,10 @@ The core listens on one socket for `channel.inbound` ([channel.md](channel.md)) 
 
 | Tool | Maps to |
 |---|---|
+| `read_*` | `browser.open` (read-only) / `browser.extract` / `mcp.call` under a standing `read` grant: the person's own orders, subscriptions, bookings |
 | `search_*`, `browse_*` | `mcp.call` / `browser.*` under a standing grant |
-| `request_booking` | `grant.request` with `mode: one_shot`, `ops: ["book"]` and exact constraints, then sends the person the approval link with the option restated |
+| `ask_to_sign_in` | sends the person "please sign in to <site> on <device>", then `browser.await_login` |
+| `request_booking`, `request_order_change` | `grant.request` with `mode: one_shot`, `ops: ["book"]` and exact constraints, then sends the person the approval link with the option restated |
 | `complete_booking` | the binding `mcp.call` / `browser.act`, only after `grant.event` says the one-shot grant is approved |
 | `read_context` | `context.read` (off unless the errand needs it) |
 | `send_message` | `channel.send` |
@@ -33,9 +35,10 @@ The core listens on one socket for `channel.inbound` ([channel.md](channel.md)) 
 - **Binding acts need the passkey.** The core can't complete a booking on its own say-so: the broker refuses without an approved one-shot grant, and only the person can approve one.
 - **Ask, don't assume.** If anything needed for the act is missing or ambiguous, ask the person. Don't request a grant on a guess.
 - **Declare where possible, log where not.** Before a binding act on a relying party that can't receive a declaration, call `identity.declaration` so the would-be declaration is logged.
-- **Sign broker requests** with the agent key (`identity.sign`, `caller_proof`).
-- Config (`core.toml`) gives socket paths, the router URL and the allowlisted sender per channel. Nothing else is hard-coded.
+- **Pass deadlines on.** When a page carries `notices` (a cutoff, an auto-checkout time, a countdown), say the deadline in the reply as an absolute time in the person's zone.
+- **Use your own socket.** The core reaches the broker only on `broker-core.sock`, which only its Unix user can open; that is its caller proof ([broker.md](broker.md#caller-proof)).
+- Config (`core.toml`) gives socket paths, the router URL and the paired account per channel (read from each adapter's pairing file). Nothing else is hard-coded.
 
 ## The fixture errand (the integration test)
 
-The core plus every other part's fixture completes a scripted booking end to end: request → search → one option → approval link → (fixture approves) → booking → confirmation message → `history verify` passes. Every PR keeps this green.
+The core plus every other part's fixture completes a scripted booking end to end, and a scripted read errand ("what's in my order this week, and until when can I change it?") against the fixture site's standing order: request → search → one option → approval link → (fixture approves) → booking → confirmation message → `history verify` passes. Every PR keeps this green.

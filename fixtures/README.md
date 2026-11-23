@@ -1,6 +1,6 @@
 # Fixtures
 
-Stand-ins for every part, per [contracts v0.1-draft](../contracts/). They need no network, no account and no secret. A part is done when the fixture errand still passes with that part in place of its fixture.
+Stand-ins for every part, per [contracts v0.2-draft](../contracts/). They need no network, no account and no secret. A part is done when the fixture errand still passes with that part in place of its fixture.
 
 ```
 npm ci
@@ -12,12 +12,12 @@ Needs Node 22+. The only dependencies are the schema validator (`ajv`, `ajv-form
 
 | Fixture | Contract | What it does |
 |---|---|---|
-| `site/` | (a relying party) | A plain-HTML look-alike booking site: search, slots, sign-in, confirm, done. `blockAutomation: true` makes it refuse self-declared automation past the home page |
+| `site/` | (a relying party) | A plain-HTML look-alike site. Booking pages: search, slots, sign-in, confirm, done. An account page with a standing order: items, +/− buttons, an auto-checkout banner. `blockAutomation: true` makes it refuse self-declared automation past the home page |
 | `store/` | broker.md: CredentialStore | Fake credentials, wrapped so they can't be printed |
-| `broker/` | broker.md | Real grant rules (one-shot booking, exact constraints, consumption, refusals), signed action log, agent and broker keys. Approvals happen automatically, standing in for the passkey. Fronts a fake reservations MCP server |
-| `browser-worker/` | browser-worker.md | A small HTTP "browser" for plain-HTML sites. Origin-bound login, masked secrets, the binding click gated on a matching one-shot grant. Honest user agent |
+| `broker/` | broker.md | Real grant rules (credential or operator-session grants, `read`, one-shot binding ops, exact constraints, consumption, origin, refusals), signed action log, agent and broker keys, one socket per caller. Approvals happen automatically, standing in for the passkey. Fronts a fake reservations MCP server |
+| `browser-worker/` | browser-worker.md | A small HTTP "browser" for plain-HTML sites. Origin-bound login, masked secrets, read-only sessions, `extract`, `notices`, `await_login` with `operatorSignIn()` standing in for the person, the binding click gated on a matching one-shot grant. Honest user agent |
 | `router/` | router.md | `POST /infer`, scripted replies |
-| `channel/` | channel.md | Terminal channel with an allowlist |
+| `channel/` | channel.md | Terminal channel with pairing: one-time code, pinned account id and identity key |
 | `context/` | context-gateway.md | Fake items, tag scopes, a denylist that must never leak, logged reads |
 | `history/` | history.md | `show`, `verify`, `errands` over the three logs |
 | `errand/run.js` | core.md | A stand-in core running the booking errand, checking every request and response against `contracts/schemas/` |
@@ -26,9 +26,10 @@ Needs Node 22+. The only dependencies are the schema validator (`ajv`, `ajv-form
 
 - **A real-browser worker fixture** (Playwright against `site/`). The HTTP worker covers the contract, not JavaScript-heavy sites.
 - **A real MCP wire fixture.** `FAKE_MCP` is in-process; a fixture speaking the MCP protocol is still to come.
-- **Caller proof.** Not implemented, because of an open contract question (below).
+- **Socket ownership.** The fixture runs as one Unix user, so it proves the caller by socket path and the `caller` field only. A real broker gives each socket to its caller's user (`0600`) and may check `SO_PEERCRED`.
+- **`standing_order_origins` and `edit_order` in the worker.** The read-only refusal is covered. A non-read-only session on a standing-order site doesn't yet demand an `edit_order` grant.
 
-## Open contract questions found while building these
+## Contract questions settled in 0.2
 
-1. **Caller proof is circular.** broker.md has the core sign broker requests with the agent key, but the broker holds that key and signs on request. So proof of caller rests on who may reach the broker's socket. For 0.2: either the core holds its own key, or the broker checks the peer's Unix credentials (`SO_PEERCRED`) and drops `sig`.
-2. **Standing-grant use is logged per page open, not per action.** That's fine for search, but say so in history.md.
+1. **Caller proof** was circular (the broker held the key it verified). It's now one socket per caller ([broker.md](../contracts/broker.md#caller-proof)).
+2. **Standing-grant logging granularity** is now stated in history.md.
