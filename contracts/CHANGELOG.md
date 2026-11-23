@@ -56,9 +56,13 @@ From a live test of fetching a login from the person's own password manager (Bit
 
 ### Still open for 0.4
 
-- **How long a login approval lasts.** Standing grants cap at 7 days. Shipped agents let one approval cover a site for 30 days. Should `login`-only grants be allowed 30?
-- **One tap, not two.** With a vault that prompts on its own, the person approves twice: the passkey on the grant, then the vault's prompt. Merge them, or let the passkey stand in for the vault's prompt?
-- **Background errands with a personal vault.** A `device_local` store can't serve them. The options are a phone approval in front of the vault (our own provider), or a narrow service-account store (`bw serve`) for a chosen set of logins.
+- **How long a login approval lasts. Decided: stay at 7 days.** Standing grants, `login`-only included, keep the 7-day cap while the project is scaling up. Shipped agents allow 30 days per site; revisit once there's a track record.
+- **One tap, not two. Goal: one tap.** With a vault that prompts on its own, the person approves twice: the passkey on the grant, then the vault's prompt. One tap is the target. For now:
+  - stores with `approval: none` (the `bw serve` store below) already need only the passkey;
+  - `device_local` stores (Agent Access) keep both taps until there's a provider that can take the broker's approval as its own.
+- **Background errands with a personal vault. Decided: a narrow `bw serve` store for recurring errands.** A `device_local` store can't serve them. Recurring errands the person sets up in advance (a weekly shopping order, say) get logins from a separate `bw serve` account that can see only a chosen collection. Agent Access stays the route for one-off sign-ins with the person at the computer. To settle before building it:
+  - what may go in the collection (logins only; no payment cards, no email or bank logins);
+  - whether checkout on a recurring errand still needs a fresh one-shot grant.
 - **Sign-in links** sent by email: like codes, but they're links. Does the same slot carry them?
 - From 0.2: read-only enforcement in `operator_browser` mode; a Playwright worker fixture and an MCP wire fixture; which op a non-final, state-changing click on an ordinary site needs.
 
