@@ -1,0 +1,21 @@
+[Unit]
+Description=Vaultwarden for the open personal agent's logins (127.0.0.1:8222, not published)
+After=network.target
+
+[Service]
+User=opa-vault
+EnvironmentFile=/etc/opa/vaultwarden.env
+ExecStart=/opt/vaultwarden/vaultwarden
+WorkingDirectory=/var/lib/opa/vault
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opa/vault
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Open personal agent: web channel (chat page on 127.0.0.1:8081)
+After=network-online.target
+Requires=opa-channel-web.socket
+
+[Service]
+User=opa-web
+SupplementaryGroups=opa-core-callers
+Sockets=opa-channel-web.socket
+ExecStart=/usr/local/bin/node /opt/opa/channel-web/src/main.js /etc/opa/web.json
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opa/web
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

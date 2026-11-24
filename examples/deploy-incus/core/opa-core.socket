@@ -1,0 +1,12 @@
+[Unit]
+Description=Open personal agent: the core's socket (the broker and channel adapters call in, by group)
+
+[Socket]
+ListenStream=/run/opa/core.sock
+SocketUser=opa-core
+SocketGroup=opa-core-callers
+SocketMode=0660
+Service=opa-core.service
+
+[Install]
+WantedBy=sockets.target

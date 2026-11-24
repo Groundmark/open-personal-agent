@@ -1,0 +1,41 @@
+{
+  "state_dir": "/var/lib/opa/broker",
+  "operator": "agent.groundmark.fyi",
+  "approval": {
+    "origins": [
+      "https://approve.groundmark.fyi",
+      "https://chat.groundmark.fyi"
+    ],
+    "rp_id": "groundmark.fyi",
+    "port": 8443
+  },
+  "core_socket": "/run/opa/core.sock",
+  "pending_seconds": 1800,
+  "agent_keyid": "agent.groundmark.fyi#k1",
+  "web_services": {
+    "table": {
+      "credential": "table.groundmark.fyi",
+      "base_url": "https://table.groundmark.fyi",
+      "tools": {
+        "find_tables": {
+          "op": "search",
+          "method": "GET",
+          "path": "/api/availability"
+        },
+        "book_table": {
+          "op": "book",
+          "method": "POST",
+          "path": "/api/bookings"
+        }
+      }
+    }
+  },
+  "vault": {
+    "type": "bitwarden",
+    "bw": "/opt/opa/bw/node_modules/.bin/bw",
+    "app_data_dir": "/var/lib/opa/broker/bw",
+    "server_url": "https://127.0.0.1:8222",
+    "collection_id": "<the collection id vault/install.sh prints>",
+    "ca_file": "/etc/opa/vault-tls/cert.pem"
+  }
+}
