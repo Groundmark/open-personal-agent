@@ -1,0 +1,11 @@
+{
+  "name": "@open-personal-agent/channel-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The web channel adapter: chat with your agent from a page on your phone; approvals in the chat.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "bin": { "opa-channel-web": "src/main.js" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}
