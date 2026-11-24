@@ -1,0 +1,11 @@
+{
+  "name": "@open-personal-agent/history",
+  "version": "0.1.0",
+  "private": true,
+  "description": "History tools (contracts/history.md): show, verify and errands over the three logs, offline.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "bin": { "history": "src/cli.js" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}

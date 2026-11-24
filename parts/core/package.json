@@ -1,0 +1,10 @@
+{
+  "name": "@open-personal-agent/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The core (contracts/core.md): the loop between the person, the model and the other parts.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}
