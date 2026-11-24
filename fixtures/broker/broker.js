@@ -45,7 +45,7 @@ export class BrokerFixture {
     this.onGrantEvent = onGrantEvent;
     this.grants = new Map();
     this.codeSlots = new Map(); // slot_id -> { session_id, resolve, timer }
-    this.onCodeSlot = () => {}; // how the channel adapter hears a slot opened (code_slot.opened)
+    this.onCodeSlot = () => {}; // in-process hook for tests; adapters ask with code.slots
     this.worker = new BrowserWorker({ store, mode: browserMode, getBookGrant: (id) => this.#usableBookGrant(id) });
   }
 
@@ -168,6 +168,16 @@ export class BrokerFixture {
           if (!c.venue || !c.date || !c.time || !c.party_size) throw new ContractError('bad_request', 'book needs venue, date, time, party_size');
         }
         if (a.ops.includes('edit_order') && !(a.constraints?.changes?.length)) throw new ContractError('bad_request', 'edit_order needs constraints.changes');
+        // 0.4: a binding grant on a credential with tools is for exactly one call, fixed now and approved.
+        let request = null;
+        if (typeof a.credential === 'string' && a.ops.some((o) => BINDING_OPS.has(o))) {
+          const found = Object.entries(FAKE_MCP).filter(([, srv]) => srv.credential === a.credential)
+            .flatMap(([server, srv]) => Object.entries(srv.tools).filter(([tool, t]) => BINDING_OPS.has(t.op) && a.ops.includes(t.op)
+              && (!a.call || (a.call.server === server && a.call.tool === tool))).map(([tool]) => ({ server, tool })));
+          if (a.call && !found.length) throw new ContractError('bad_request', `no binding tool ${a.call.server}/${a.call.tool}`);
+          if (found.length > 1) throw new ContractError('bad_request', 'several tools could do this: name one in call');
+          request = found[0] ?? null;
+        }
         const grant_id = ulid();
         const target = bySite
           ? (found ? `your login ${found.record.username} for ${a.credential.domain}` : `a login for ${a.credential.domain} from your vault (your vault will ask you which)`)
@@ -178,9 +188,9 @@ export class BrokerFixture {
         const g = {
           grant_id, errand_id: req.errand_id, credential: a.credential ?? null, session: a.session ?? null,
           domain: bySite ? a.credential.domain : null, credential_ref, operator_present: !!a.operator_present, ops: a.ops, constraints: a.constraints, mode: a.mode,
-          ttl_seconds: a.ttl_seconds, purpose: a.purpose, state: 'pending', uses: 0, approved_at: null, expires_at: null, last_used_at: null,
+          ttl_seconds: a.ttl_seconds, purpose: a.purpose, state: 'pending', uses: 0, approved_at: null, expires_at: null, last_used_at: null, request,
         };
-        g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode })).digest('hex');
+        g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, request })).digest('hex');
         this.grants.set(grant_id, g);
         this.log.append({ errand_id: req.errand_id, type: 'grant.requested', grant_id, detail: { credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, purpose: a.purpose } });
         if (this.autoApprove) setTimeout(() => this.approve(grant_id), this.approveDelayMs);
@@ -209,10 +219,9 @@ export class BrokerFixture {
           g = this.#requireUsable(grant_id, t.op);
           if (g.credential !== srv.credential) throw new ContractError('op_not_granted', `grant is for ${g.credential}`);
           if (BINDING_OPS.has(t.op)) {
-            const c = g.constraints;
-            if (args.venue !== c.venue || args.date !== c.date || args.time !== c.time || args.party_size !== c.party_size) {
-              throw new ContractError('constraint_mismatch', 'arguments differ from the approved grant');
-            }
+            // 0.4: exactly the approved call: this server and tool, and the same arguments (every field, nothing added).
+            if (!g.request || g.request.server !== server || g.request.tool !== tool) throw new ContractError('constraint_mismatch', 'not the call that was approved');
+            if (canonical(args ?? {}) !== canonical(g.constraints ?? {})) throw new ContractError('constraint_mismatch', 'arguments differ from the approved grant');
           }
         } catch (e) { throw this.#refuse(req.errand_id, grant_id, e); }
         await this.store.get(srv.credential); // the token is used here and goes no further
@@ -303,13 +312,20 @@ export class BrokerFixture {
           const ms = (a.timeout_seconds ?? 300) * 1000;
           code = await new Promise((resolve, reject) => {
             const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new ContractError('code_timeout', 'no code from the person')); }, ms);
-            this.codeSlots.set(slot_id, { session_id: a.session_id, resolve, timer });
-            this.onCodeSlot({ slot_id, account_id: 'paired', expires_at: new Date(Date.now() + ms).toISOString() });
+            const expires_at = new Date(Date.now() + ms).toISOString();
+            this.codeSlots.set(slot_id, { session_id: a.session_id, resolve, timer, expires_at });
+            this.onCodeSlot({ slot_id, account_id: 'paired', expires_at });
           }).catch((e) => { throw this.#refuse(req.errand_id, a.grant_id, e); });
         }
         const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
         this.#consume(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
         return r;
+      },
+
+      'code.slots': async ({ wait_seconds = 50 } = {}) => {
+        const open = () => [...this.codeSlots].map(([slot_id, s]) => ({ slot_id, expires_at: s.expires_at }));
+        for (const until = Date.now() + Math.min(wait_seconds, 60) * 1000; !open().length && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
+        return { slots: open() };
       },
 
       'code.deliver': async ({ slot_id, code }) => {
@@ -323,9 +339,13 @@ export class BrokerFixture {
 
       'browser.close': async (a) => this.worker.close(a),
 
-      'identity.sign': async ({ purpose, payload_b64 }) => ({
-        kid: this.agentKey.kid, alg: 'Ed25519', sig_b64: signB64(this.agentKey, Buffer.from(payload_b64, 'base64')),
-      }),
+      'identity.sign': async ({ purpose, payload_b64 }) => {
+        // 0.4: declarations only, and a declaration is a JSON object. The broker signs requests to relying parties itself.
+        const bytes = Buffer.from(payload_b64 ?? '', 'base64');
+        let obj = null; try { obj = JSON.parse(bytes.toString('utf8')); } catch {}
+        if (purpose !== 'declaration' || !obj || typeof obj !== 'object' || Array.isArray(obj)) throw new ContractError('bad_request', 'identity.sign signs declarations (JSON objects) only');
+        return { kid: this.agentKey.kid, alg: 'Ed25519', sig_b64: signB64(this.agentKey, bytes) };
+      },
 
       'identity.declaration': async ({ relying_party, act, grant_id }, req) => {
         const declaration = { format: 'opa-draft-0', operator: 'fixture-operator.example', agent_kid: this.agentKey.kid, relying_party, act, grant_id, ts: nowIso() };
@@ -349,7 +369,7 @@ export class BrokerFixture {
       authorize: (req) => {
         if (req.caller !== caller) throw new ContractError('unauthorized_caller', `this socket is for ${caller}, not ${req.caller}`);
         // code.deliver is for channel adapters only (contracts/broker.md).
-        if (req.op === 'code.deliver' && !caller.startsWith('channel-')) throw new ContractError('unauthorized_caller', 'code.deliver is served only on channel adapters\' sockets');
+        if ((req.op === 'code.deliver' || req.op === 'code.slots') && !caller.startsWith('channel-')) throw new ContractError('unauthorized_caller', 'code.deliver is served only on channel adapters\' sockets');
       },
     });
   }

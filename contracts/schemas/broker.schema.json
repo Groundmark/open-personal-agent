@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Groundmark/open-personal-agent/contracts/schemas/broker.schema.json",
-  "title": "Broker: credentials, grants, identity (0.2-draft)",
+  "title": "Broker: credentials, grants, identity (0.4-draft)",
   "$defs": {
     "grant_state": {
       "enum": [
@@ -93,6 +93,23 @@
         "operator_present": {
           "type": "boolean",
           "default": false
+        },
+        "call": {
+          "description": "For a binding op on a credential with more than one tool that could make the act: the one call the grant allows. The broker fixes the call (and, for a relying party, the exact HTTP request) when the grant is created, and the passkey approves it.",
+          "type": "object",
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "tool"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -365,10 +382,7 @@
       "type": "object",
       "properties": {
         "purpose": {
-          "enum": [
-            "declaration",
-            "http_request"
-          ]
+          "const": "declaration"
         },
         "payload_b64": {
           "type": "string",
@@ -624,15 +638,69 @@
         "accepted"
       ]
     },
-    "code_slot.opened": {
-      "description": "Broker to channel adapter: a code slot is open for the paired account.",
+    "code.slots.args": {
+      "type": "object",
+      "properties": {
+        "wait_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "default": 50
+        }
+      },
+      "additionalProperties": false
+    },
+    "code.slots.result": {
+      "type": "object",
+      "properties": {
+        "slots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/code_slot"
+          }
+        }
+      },
+      "required": [
+        "slots"
+      ]
+    },
+    "exact_request": {
+      "description": "The one call a binding grant allows, fixed when the grant is created and covered by the passkey. method, url and content_digest are present when the tool is a relying party the broker reaches over HTTP and signs as the agent.",
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "content_digest": {
+          "type": "string",
+          "description": "RFC 9530 Content-Digest of the body, e.g. sha-256=:...:"
+        }
+      },
+      "required": [
+        "server",
+        "tool"
+      ]
+    },
+    "code_slot": {
+      "description": "A code slot the broker has open: returned by code.slots on a channel adapter's socket.",
       "type": "object",
       "properties": {
         "slot_id": {
           "type": "string"
         },
         "account_id": {
-          "type": "string"
+          "type": "string",
+          "description": "The paired account the code is for, where the broker knows it. With one paired person it may be left out."
         },
         "expires_at": {
           "type": "string",
@@ -641,7 +709,6 @@
       },
       "required": [
         "slot_id",
-        "account_id",
         "expires_at"
       ]
     },

@@ -1,6 +1,6 @@
 # Broker contract (credentials, grants, identity)
 
-**0.3-draft.** The broker holds the person's secrets and acts on them under **grants** the person approves with a **passkey**. The agent never holds a raw secret: it asks the broker to *do* something, and the broker does it and returns the result with no secret in it.
+**0.4-draft.** The broker holds the person's secrets and acts on them under **grants** the person approves with a **passkey**. The agent never holds a raw secret: it asks the broker to *do* something, and the broker does it and returns the result with no secret in it.
 
 ## Concepts
 
@@ -22,6 +22,8 @@
 - **Standing grant:** reusable until `expires_at`. Use it for `read`, `search` and `login`.
 - **One-shot grant:** consumed by its first successful use. **Every binding op needs its own one-shot grant** whose constraints match the act exactly.
 - **Approval:** the person opens `approve_url` and approves with a passkey (WebAuthn, user verification required). The assertion is bound to the grant's id and a hash of its contents, so it can't be replayed onto another grant.
+- **Exact request:** for a binding op made by a tool (an MCP server, or a relying party the broker calls itself), the broker fixes the one call the grant allows when it creates the grant: the server and tool, and for a relying party reached over HTTP the method, URL and body digest. It's part of what the passkey approves, and the broker sends that request and nothing else ([Relying parties](#relying-parties-that-verify-the-agent)). **The approval page shows all of it:** every constraint the call will carry (not only the familiar ones), and the call itself (server and tool, or method and URL).
+- **Relying party:** a site that knows the agent by its Groundmark identity and verifies its signature, with no login of the person's. The broker reaches it over HTTPS and signs each request as the agent, under a grant. The credential names the service; there's no secret behind it.
 - **Proxy, not mint.** The broker calls services with the secret itself. It never mints a new credential for the agent.
 
 ## Operations
@@ -40,6 +42,7 @@ Ask for a grant. The broker creates it as `pending` and returns a link for the p
 | `ttl_seconds` | integer: how long it stays valid once approved. Max 7 days for standing, 1 hour for one-shot |
 | `purpose` | string: one plain sentence shown to the person on the approval page |
 | `operator_present` | boolean, default `false`: the person is at the device that runs the browser or the store's provider. Decides whether a store that asks the person on that device can be used ([Stores that ask the person themselves](#stores-that-ask-the-person-themselves)) |
+| `call` | `{ "server", "tool" }`, optional: for a binding op, the one tool the grant is for. Needed only when the credential has more than one tool that could make the act; otherwise the broker picks the only one. `bad_request` if it names no such tool, or if it's needed and missing |
 
 result: `{ "grant_id", "state": "pending", "approve_url", "summary" }`. `summary` is the plain-language text the approval page shows; the core should send it with the link.
 
@@ -60,7 +63,10 @@ Call a tool on a remote MCP server using a credential the broker holds.
 args `{ "grant_id", "server", "tool", "arguments" }` → result `{ "content" }`, the tool's result, with any credential material removed.
 
 - Refused unless the grant is `approved`, covers `server`, and covers the op the tool maps to.
-- A tool that maps to a binding op needs a one-shot grant whose constraints match the call's arguments exactly.
+- A tool that maps to a binding op needs a one-shot grant whose constraints match the call's arguments exactly: the same fields with the same values, nothing added.
+- **It must also be the approved call.** `server` and `tool` must be the grant's exact request, and for a relying party the request the broker would send now (method, URL, body digest) must equal the approved one. Otherwise `constraint_mismatch`, and nothing is sent. This catches a configuration that changed between approval and use, including a tool that became a relying party or stopped being one.
+- **No exact request, no binding call.** A binding grant created without one (before 0.4, or for a browser booking, before any tool could make the act) can't be used for a binding tool: `constraint_mismatch`, and the core asks for a new grant.
+- **An unknown outcome spends a one-shot grant.** Only a definite refusal from the tool (for HTTP, a 4xx other than 408 and 429) gives the grant back for another try. A timeout, a lost connection or a 5xx might have gone through, so the grant counts as used and the core tells the person it couldn't confirm the outcome. It never retries on its own.
 
 ### `browser.*`
 
@@ -88,15 +94,28 @@ args `{ "grant_id", "session_id", "source": "store_totp" | "person", "timeout_se
 - **`person`:** the code goes to the person, usually by SMS or email from the site. The broker opens a **code slot** for this session and returns once the slot is filled or `timeout_seconds` passes (`code_timeout`). The core tells the person "reply with the code from <site>". The channel adapter puts the person's next message into the slot ([channel.md](channel.md#one-time-codes)), so it never reaches the core.
 - A code slot takes one code and closes. Only one slot can be open per session at a time.
 
+### `code.slots` (channel adapters only)
+
+How an adapter learns that a code slot opened. The adapter is always the caller on its socket, so the broker can't start that conversation; the adapter asks instead, and waits.
+
+args `{ "wait_seconds"? }` (0 to 60, default 50) → result `{ "slots": [ { "slot_id", "expires_at", "account_id"? } ] }`
+
+- Returns at once if a slot is open, otherwise as soon as one opens, or with an empty list after `wait_seconds`. The adapter asks again straight away: a long poll.
+- `account_id` is the paired account the code is for, where the broker knows it. With one paired person it may be left out.
+- Served only on channel adapters' sockets, like `code.deliver` (`unauthorized_caller` on `broker-core.sock`). Never carries a code.
+
 ### `code.deliver` (channel adapters only)
 
 args `{ "slot_id", "code" }` → result `{ "accepted": true }`. It's served only on channel adapters' sockets (`broker-channel-<name>.sock`) and refused on `broker-core.sock` (`unauthorized_caller`). `code` must be 4 to 10 characters, letters and digits only, or it's refused with `bad_request` and the slot stays open.
 
 ### `identity.sign`
 
-Sign bytes with the **agent's** key, which is separate from the broker's own key. The broker holds it; the agent uses it.
+Sign a declaration with the **agent's** key, which is separate from the broker's own key. The broker holds it; the agent uses it.
 
-args `{ "purpose": "declaration" | "http_request", "payload_b64" }` → result `{ "kid", "alg": "Ed25519", "sig_b64" }`
+args `{ "purpose": "declaration", "payload_b64" }` → result `{ "kid", "alg": "Ed25519", "sig_b64" }`
+
+- **Declarations only.** `payload_b64` must decode to a JSON object, so a signature from this op can never pass as the signature of an HTTP request.
+- **No `http_request` (removed in 0.4).** A relying party trusts a request signed with the agent's key as the agent's own act. If the core could get any request signed, a compromised core could book or buy with no grant. The broker signs requests to relying parties itself, under a grant, and only the approved request for a binding op ([Relying parties](#relying-parties-that-verify-the-agent)). `purpose: "http_request"` is refused with `bad_request`.
 
 ### `identity.declaration`
 
@@ -124,6 +143,15 @@ args `{}` → result `{ "version", "store", "agent_kid", "broker_kid" }`
 - **Remote parts** (a browser worker on the person's laptop) are reached the other way round: the broker signs each call with the **broker** key, and the worker verifies it. That signature is real proof, because only the broker holds the key.
 
 The envelope's `sig` field stays, for seams that cross machines.
+
+## Relying parties that verify the agent
+
+A relying party that supports Groundmark knows the agent by its domain: it reads the agent's public key from DNS (`_agentid.<agent domain>`, DNSSEC-validated) and checks a signature on each request (RFC 9421 HTTP Message Signatures, Ed25519). There's no login of the person's and no secret in the store, so the broker is the only part that can act there as the agent.
+
+- **The broker makes the request and signs it.** It's configured with each relying party's tools: an op, a method and a path. The core calls them with `mcp.call`, as it would an MCP server. The broker covers `@method`, `@authority`, `@target-uri` and, with a body, `content-digest`. For a state-changing request it signs again with the relying party's nonce when challenged (`401` with `Accept-Signature`).
+- **Under a standing grant it signs only reads.** A tool for a non-binding op (`read`, `search`) must use `GET`; a broker refuses to start with any other method configured for one. The arguments become the query string, but they can't replace a query parameter fixed in the configured path (`bad_request`). `GET` alone doesn't make an endpoint safe: whoever configures a relying party's read tools must point them at endpoints that stay read-only for any arguments (no action or method-override parameters).
+- **Under a one-shot grant it signs exactly the approved request.** The grant carries the exact request (method, URL, body digest); the approval page shows the method and URL, and the passkey signs them with the rest of the grant. The body is the arguments as canonical JSON (RFC 8785), so the same arguments always give the same digest.
+- **The result says it was signed.** `content` carries `groundmark: { presented: true, verified: true }` when the relying party accepted the signature.
 
 ## Errors
 
@@ -183,7 +211,10 @@ CredentialStore.approval            -> "none" | "device_local" | "remote"
 - **Implementations:**
   - `FixtureCredentialStore` (tests)
   - `AgentAccessStore`: Bitwarden or Vaultwarden through `aac`, `fetch` only, `device_local`. The vault stays unlocked only on the person's computer.
-  - a `bw serve` store with a service account: `get` and `find`, `none`. This is the fallback.
+  - **A Bitwarden store with a service account** (`bw` CLI, one collection): `get` and `find`, `none`. For errands the person isn't watching, such as recurring ones. **It runs the `bw` command once per request, never `bw serve`:** `bw serve`'s local API has no authentication, so any program on the machine, the core included, could read the vault through it.
+    - **Where the unlocked vault lives.** The broker unlocks the account when it starts. The session key stays in the broker's memory and is handed to each `bw` command in its environment while the command runs, never on the command line or on disk. The account's encrypted data is in the broker's own `0700` directory. The account's password and API key reach the broker at start as files only it can read (for example systemd `LoadCredential=`).
+    - **Who can read it:** the broker's own user and root. Every other part runs as another user and can't.
+    - **The trade-off:** the vault stays unlocked until the broker stops.
 
   Another vault is another implementation of this interface.
 

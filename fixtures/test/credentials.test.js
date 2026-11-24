@@ -1,5 +1,5 @@
 // node --test test/   (from fixtures/)
-// Contracts 0.3: credentials by site, stores that ask the person themselves, one-time codes.
+// Contracts 0.3 and 0.4: credentials by site, stores that ask the person themselves, one-time codes, identity.sign.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -101,4 +101,37 @@ test('one-time code from the person times out', () => withEnv(async (env) => {
   const g = await approved(env, { ...LOGIN, credential: { domain: 'table.example' } });
   const r = await B(env, 'browser.fill_code', { grant_id: g.grant_id, session_id: 's', source: 'person', timeout_seconds: 1 });
   assert.equal(r.error, 'code_timeout');
+}));
+
+test('0.4: the adapter hears of a code slot by asking (code.slots), and only on its own socket', () => withEnv(async (env) => {
+  env.store.setOrigin('item-table', env.site.origin);
+  const C = (op, args) => checkedCall(env.sock('broker-channel-terminal'), op, 'channel-terminal', null, args);
+  assert.deepEqual((await C('code.slots', { wait_seconds: 0 })).result, { slots: [] });
+  const g = await approved(env, { ...LOGIN, credential: { domain: '127.0.0.1' } });
+  const { result: { session_id } } = await B(env, 'browser.open', { grant_id: g.grant_id, url: env.site.origin + '/login' });
+  const waiting = C('code.slots', { wait_seconds: 10 });
+  const pending = B(env, 'browser.fill_code', { grant_id: g.grant_id, session_id, source: 'person', timeout_seconds: 30 });
+  const { result: { slots } } = await waiting;
+  assert.equal(slots.length, 1);
+  assert.equal((await C('code.deliver', { slot_id: slots[0].slot_id, code: '771204' })).result.accepted, true);
+  assert.deepEqual((await pending).result, { filled: true });
+  assert.equal((await B(env, 'code.slots', { wait_seconds: 0 })).error, 'unauthorized_caller');
+}));
+
+test('0.4: identity.sign signs declarations only; the core can\'t get an HTTP request signed', () => withEnv(async (env) => {
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  const ok = await B(env, 'identity.sign', { purpose: 'declaration', payload_b64: b64('{"act":"book"}') });
+  assert.equal(ok.result.alg, 'Ed25519');
+  assert.equal((await B(env, 'identity.sign', { purpose: 'http_request', payload_b64: b64('"@method": POST') })).error, 'bad_request');
+  assert.equal((await B(env, 'identity.sign', { purpose: 'declaration', payload_b64: b64('"@method": POST') })).error, 'bad_request');
+}));
+
+test('0.4: a binding grant allows exactly the approved call: same tool, every argument the same', () => withEnv(async (env) => {
+  const BOOK = { venue: 'Casa Verde', date: '2026-12-04', time: '19:00', party_size: 2 };
+  const ask = (extra = {}) => B(env, 'grant.request', { credential: 'fake-mcp', ops: ['book'], constraints: BOOK, mode: 'one_shot', ttl_seconds: 600, purpose: 'Book', ...extra });
+  assert.equal((await ask({ call: { server: 'fake-reservations', tool: 'no_such_tool' } })).error, 'bad_request');
+  const g = await approved(env, { credential: 'fake-mcp', ops: ['book'], constraints: BOOK, mode: 'one_shot', ttl_seconds: 600, purpose: 'Book' });
+  const call = (args) => B(env, 'mcp.call', { grant_id: g.grant_id, server: 'fake-reservations', tool: 'book_table', arguments: args });
+  assert.equal((await call({ ...BOOK, notes: 'and a cake' })).error, 'constraint_mismatch');   // a field nobody approved
+  assert.equal((await call(Object.fromEntries(Object.entries(BOOK).reverse()))).ok, true);     // same fields, any order
 }));

@@ -1,6 +1,6 @@
 # Contracts
 
-**Version 0.3-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
+**Version 0.4-draft.** A contract is the written promise one part makes to the others: what you can ask it, what it answers, how it fails, and a fake version of itself you can test against. Build to the contract, never to another part's internals.
 
 | Seam | Contract | Schema | Served by |
 |---|---|---|---|
