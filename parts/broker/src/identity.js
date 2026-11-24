@@ -1,7 +1,7 @@
-// Broker identity: an Ed25519 keypair made on first run.
-// The private key is broker.key in the state directory, mode 0600.
-// The public key is broker.pub (PEM, SPKI) beside it and in the log's
-// first entry.
+// An Ed25519 keypair made on first run: the broker's own (broker.key, signs the log) and the
+// agent's (agent.key, signs declarations and requests to relying parties), kept apart.
+// The private key is <name>.key in the state directory, mode 0600; the public key is
+// <name>.pub (PEM, SPKI) beside it.
 
 import { generateKeyPairSync, createPrivateKey, createPublicKey } from 'node:crypto';
 import { readFileSync, writeFileSync, statSync, existsSync } from 'node:fs';
@@ -10,9 +10,9 @@ import { join } from 'node:path';
 export const PRIVATE_KEY_FILE = 'broker.key';
 export const PUBLIC_KEY_FILE = 'broker.pub';
 
-export function loadOrCreateIdentity(stateDir) {
-  const keyPath = join(stateDir, PRIVATE_KEY_FILE);
-  const pubPath = join(stateDir, PUBLIC_KEY_FILE);
+export function loadOrCreateIdentity(stateDir, name = 'broker') {
+  const keyPath = join(stateDir, `${name}.key`);
+  const pubPath = join(stateDir, `${name}.pub`);
 
   if (!existsSync(keyPath)) {
     const { privateKey } = generateKeyPairSync('ed25519');

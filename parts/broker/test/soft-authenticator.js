@@ -2,7 +2,7 @@
 // and for the browser's WebAuthn layer around it. ES256 (P-256) keys made
 // fresh per instance, attestation "none", and user verification on unless a
 // test turns it off. It builds clientDataJSON as a browser would, from the
-// page's origin, and refuses an rpId that is not the origin's host.
+// page's origin, and refuses an rpId that is neither the origin's host nor a parent domain of it, as browsers do.
 //
 //   const a = new SoftAuthenticator();
 //   a.credentials(origin)   a navigator.credentials for the page at origin:
@@ -16,6 +16,7 @@
 import { createHash, generateKeyPairSync, sign, randomBytes } from 'node:crypto';
 
 const sha256 = (b) => createHash('sha256').update(b).digest();
+const rpOk = (rpId, origin) => { const h = new URL(origin).hostname; return h === rpId || (rpId.includes('.') && h.endsWith('.' + rpId)); };
 
 export class SoftAuthenticator {
   #creds = new Map(); // credential id (base64url) -> { id, rpId, privateKey, jwk, counter, userHandle }
@@ -55,7 +56,7 @@ export class SoftAuthenticator {
 
   #create(publicKey, origin, uv) {
     const rpId = publicKey.rp?.id ?? new URL(origin).hostname;
-    if (rpId !== new URL(origin).hostname) throw domError('SecurityError', 'rp.id is not the origin\'s host');
+    if (!rpOk(rpId, origin)) throw domError('SecurityError', 'rp.id is not the origin\'s host or a parent of it');
     if (!(publicKey.pubKeyCredParams ?? []).some((p) => p.alg === -7)) throw domError('NotSupportedError', 'ES256 not offered');
     const { privateKey, publicKey: pub } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
     const jwk = pub.export({ format: 'jwk' });
@@ -77,7 +78,7 @@ export class SoftAuthenticator {
 
   #get(publicKey, origin, uv) {
     const rpId = publicKey.rpId ?? new URL(origin).hostname;
-    if (rpId !== new URL(origin).hostname) throw domError('SecurityError', 'rpId is not the origin\'s host');
+    if (!rpOk(rpId, origin)) throw domError('SecurityError', 'rpId is not the origin\'s host or a parent of it');
     const allowed = (publicKey.allowCredentials ?? []).map((c) => buf(c.id).toString('base64url'));
     const cred = [...this.#creds.values()].find((c) => c.rpId === rpId && (allowed.length === 0 || allowed.includes(c.id.toString('base64url'))));
     if (!cred) throw domError('NotAllowedError', 'no credential for this rpId');

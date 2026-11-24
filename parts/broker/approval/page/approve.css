@@ -1,0 +1,17 @@
+:root { --bg: #fff; --fg: #111; --muted: #5b5b5b; --line: #e3e3e3; --accent: #0a5cd5; --accent-fg: #fff; --soft: #f3f5f8; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #a8a8a8; --line: #2c2c2c; --accent: #5b9bff; --accent-fg: #0b0b0b; --soft: #1b1e23; } }
+body { font: 17px/1.45 -apple-system, system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
+main { max-width: 36rem; margin: 0 auto; padding: 1.25rem 16px 3rem; }
+h1 { font-size: 1.45rem; line-height: 1.25; margin: 0.25rem 0 1rem; }
+.eyebrow { color: var(--muted); font-size: 0.9rem; margin: 0; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0 0 1rem; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+dd ul { margin: 0; padding-left: 1.1rem; }
+.details { background: var(--soft); border-radius: 0.6rem; padding: 0.8rem 1rem; }
+code { font-size: 0.8em; word-break: break-all; }
+.grant { font-size: 0.8rem; color: var(--muted); margin-top: 1.5rem; }
+button { font: inherit; font-weight: 600; width: 100%; padding: 0.9rem; margin-top: 0.75rem; border: 0; border-radius: 0.6rem; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+button:disabled { opacity: 0.5; cursor: default; }
+#status { min-height: 1.5em; font-weight: 600; }
