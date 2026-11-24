@@ -87,7 +87,10 @@ export function startSite({ port = 0, blockAutomation = false } = {}) {
       if (!sess) return send(401, page('Sign in required', ''));
       const f = await body();
       const r = RESTAURANTS.find((x) => x.id === f.r);
-      const conf = 'FT-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+      // Derived from the booking, not random, so an errand gives the same pages every run and a
+      // real router's recordings replay (parts/router). The nth booking of the same table differs.
+      const nth = bookings.filter((x) => x.venue === r?.name && x.date === f.date && x.time === f.time).length;
+      const conf = 'FT-' + crypto.createHash('sha256').update([f.r, f.date, f.time, f.covers, nth].join('|')).digest('hex').slice(0, 6).toUpperCase();
       bookings.push({ conf, venue: r?.name, date: f.date, time: f.time, party_size: Number(f.covers), user: sess.user });
       return send(200, page('Reservation confirmed', `<p>Confirmation <strong id="conf">${conf}</strong>: ${esc(r?.name)}, ${esc(f.date)} at ${esc(f.time)}, ${esc(f.covers)} people.</p>`));
     }

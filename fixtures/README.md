@@ -5,7 +5,7 @@ Stand-ins for every part, per [contracts v0.2-draft](../contracts/). They need n
 ```
 npm ci
 npm run errand   # books a table end to end and prints the conversation and the history
-npm test         # the errand plus the refusals each contract promises (13 tests)
+npm test         # the errand plus the refusals each contract promises (36 tests)
 ```
 
 Needs Node 22+. The only dependencies are the schema validator (`ajv`, `ajv-formats`), pinned.
@@ -21,6 +21,17 @@ Needs Node 22+. The only dependencies are the schema validator (`ajv`, `ajv-form
 | `context/` | context-gateway.md | Fake items, tag scopes, a denylist that must never leak, logged reads |
 | `history/` | history.md | `show`, `verify`, `errands` over the three logs |
 | `errand/run.js` | core.md | A stand-in core running the booking errand, checking every request and response against `contracts/schemas/` |
+
+## Swapping in a real part
+
+Set an environment variable and the errand uses the real part instead of its fixture:
+
+| Variable | Part |
+|---|---|
+| `OPA_ROUTER_URL` | `parts/router`: e.g. `http://127.0.0.1:8411/infer` |
+| `OPA_BROKER_MODULE` | `parts/broker`: the path to `parts/broker/src/broker.js`. The fixture store, browser worker and MCP server are plugged into it, and approvals stand in for the passkey |
+
+The fake restaurant's confirmation numbers are derived from the booking, not random, so the same errand gives the same pages every run and a recorded model run replays exactly.
 
 ## Not covered yet
 
