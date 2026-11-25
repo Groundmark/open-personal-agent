@@ -509,3 +509,76 @@ test('web services: a signed request never follows a redirect, and a redirect is
   assert.equal(await outcome(tools.rp.tools.look.run({ q: 1 })), '307 definite=false');
   assert.equal(reached.length, 0);   // the signature never went to the other host
 });
+
+// A store or worker call that waits until the test lets it go.
+const gate = () => { let open; const p = new Promise((r) => { open = r; }); const g = { waiting: false, wait: () => { g.waiting = true; return p; }, open }; return g; };
+const until = async (f) => { while (!f()) await new Promise((x) => setTimeout(x, 5)); };
+
+test('a revocation while a call waits on the store or the worker is seen before the broker acts', async () => {
+  const done = [];
+  let g1 = null, g2 = null;
+  const worker = { mode: 'agent_browser',
+    open: async () => { if (g2) await g2.wait(); done.push('open'); return { session_id: `w${done.length}`, page: {} }; },
+    close: async ({ session_id }) => { done.push(`close ${session_id}`); return {}; },
+    extract: async () => { done.push('extract'); return { page: {} }; },
+    fill_login: async () => { done.push('fill_login'); return { filled: 2 }; } };
+  const login = { ref: 'aaaaaaaa-0000-4000-8000-000000000001', record: { ref: 'aaaaaaaa-0000-4000-8000-000000000001', username: 'diner@example.test', origin: 'https://table.example' }, secret: {} };
+  const slowStore = { ...store, async find() { return [login]; }, async get(ref) { if (g1) await g1.wait(); return ref === login.ref ? login : store.get(ref); } };
+  const mcp = { svc: { credential: 'fake-table', tools: { look: { op: 'search', run: async () => { done.push('mcp'); return {}; } } } } };
+  const { b, h } = mk(tmp(), { worker, store: slowStore, mcp });
+  const ask = async (a) => { const g = await h['grant.request']({ mode: 'standing', ttl_seconds: 600, purpose: 'p', ...a }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const code = (p) => p.then(() => 'ok', (e) => e.code);
+  const revokeWhile = async (gt, grant_id, call) => {
+    const p = code(call());
+    await until(() => gt.waiting);
+    await h['grant.revoke']({ grant_id, reason: 'test' }, env('grant.revoke', {}));
+    gt.open();
+    return p;
+  };
+  // fill_login under a credential-by-site grant: revoked while the vault is asked.
+  const site = await ask({ credential: { domain: 'table.example' }, ops: ['login'] });
+  b.sessions.set('s1', { grant_id: site, url: 'https://table.example/' });
+  assert.equal(await revokeWhile(g1 = gate(), site, () => h['browser.fill_login']({ grant_id: site, session_id: 's1' }, env('x', {}))), 'grant_revoked');
+  // mcp.call: revoked while the store is read.
+  g1 = null;
+  const rp = await ask({ credential: 'fake-table', ops: ['search'] });
+  assert.equal(await revokeWhile(g1 = gate(), rp, () => h['mcp.call']({ grant_id: rp, server: 'svc', tool: 'look', arguments: {} }, env('x', {}))), 'grant_revoked');
+  // extract: revoked while the session's site is looked up.
+  g1 = null;
+  const look = await ask({ credential: 'fake-table', ops: ['search'] });
+  b.sessions.set('s2', { grant_id: look, url: 'https://table.example/' });
+  assert.equal(await revokeWhile(g1 = gate(), look, () => h['browser.extract']({ grant_id: look, session_id: 's2', target: 'x' }, env('x', {}))), 'grant_revoked');
+  g1 = null;
+  assert.deepEqual(done, ['close s1', 'close s2']);   // nothing filled, called or read (the revoked grants' sessions closed)
+  done.length = 0;
+  // open: revoked while the worker opens the page. The session it opened is closed, not left behind.
+  const look2 = await ask({ credential: 'fake-table', ops: ['search'] });
+  assert.equal(await revokeWhile(g2 = gate(), look2, () => h['browser.open']({ grant_id: look2, url: 'https://table.example/' }, env('x', {}))), 'grant_revoked');
+  assert.deepEqual(done, ['open', 'close w1']);
+  assert.equal([...b.sessions.values()].filter((s) => s.grant_id === look2).length, 0);
+});
+
+test('a one-shot grant is used once by concurrent browser calls too', async () => {
+  let opens = 0, fills = 0;
+  const worker = { mode: 'agent_browser', close: async () => ({}),
+    open: async () => { opens += 1; await new Promise((r) => setTimeout(r, 20)); return { session_id: `o${opens}`, page: {} }; },
+    fill_login: async () => { fills += 1; await new Promise((r) => setTimeout(r, 20)); return { filled: 2 }; } };
+  const { b, h } = mk(tmp(), { worker });
+  const ask = async (ops) => { const g = await h['grant.request']({ credential: 'fake-table', ops, mode: 'one_shot', ttl_seconds: 600, purpose: 'p' }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const code = (p) => p.then(() => 'ok', (e) => e.code);
+  const read = await ask(['read']);
+  const open = () => code(h['browser.open']({ grant_id: read, url: 'https://table.example/' }, env('x', {})));
+  assert.deepEqual(await Promise.all([open(), open()]), ['ok', 'grant_consumed']);
+  assert.equal(opens, 1);
+  assert.equal(b.grants.get(read).uses, 1);
+  const login = await ask(['login']);
+  b.sessions.set('s1', { grant_id: login, url: 'https://table.example/' });
+  const fill = () => code(h['browser.fill_login']({ grant_id: login, session_id: 's1' }, env('x', {})));
+  assert.deepEqual(await Promise.all([fill(), fill()]), ['ok', 'grant_consumed']);
+  assert.equal(fills, 1);
+  // A call refused before it acts gives the one-shot grant back.
+  const read2 = await ask(['read']);
+  assert.equal(await code(h['browser.open']({ grant_id: read2, url: 'https://elsewhere.example/' }, env('x', {}))), 'origin_mismatch');
+  assert.equal(b.grants.get(read2).in_flight, undefined);
+  assert.equal(await code(h['browser.open']({ grant_id: read2, url: 'https://table.example/' }, env('x', {}))), 'ok');
+});
