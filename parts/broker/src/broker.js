@@ -53,6 +53,21 @@ export class Broker {
     return g;
   }
 
+  /**
+   * Ends a grant, for the core (grant.revoke) or the person (the approval page, by: 'person'). Its sessions and code
+   * slots end with it. The core is told when it wasn't the one asking.
+   */
+  async revoke(grantId, reason = '', by = 'core') {
+    const before = this.grants.get(grantId).state;
+    const g = this.grants.revoke(grantId);
+    if (g.state === 'revoked' && before !== 'revoked') {
+      this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id: grantId, detail: { reason, ...(by !== 'core' ? { by } : {}) } });
+      await this.#endSessions(g);
+      if (by !== 'core') this.onGrantEvent(g.grant_id, 'revoked', g.errand_id);
+    }
+    return g;
+  }
+
   /** Expires what has run out. Call it on a timer; the grant store also refuses expired grants on use. */
   async sweep() {
     for (const g of this.grants.sweep(this.pendingSeconds * 1000)) {
@@ -251,12 +266,7 @@ export class Broker {
       },
 
       'grant.revoke': async ({ grant_id, reason = '' }) => {
-        const before = this.grants.get(grant_id).state;
-        const g = this.grants.revoke(grant_id);
-        if (g.state === 'revoked' && before !== 'revoked') {
-          this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id, detail: { reason } });
-          await this.#endSessions(g);
-        }
+        const g = await this.revoke(grant_id, reason);
         return { grant_id, state: g.state };
       },
 

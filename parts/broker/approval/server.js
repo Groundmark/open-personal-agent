@@ -11,6 +11,8 @@
 //   POST /approve/<grant_id>           the assertion: checked by @simplewebauthn/server and again by
 //                                      binding.checkAssertion, then the broker approves the grant
 //   POST /approve/<grant_id>/decline   the person says no (no passkey needed to decline)
+//   POST /approve/<grant_id>/revoke    the person ends an approved grant, or a spent one-shot one (no passkey, as
+//                                      for declining: it only ever stops the agent; contracts/broker.md grant.revoke)
 //   GET  /enroll/<token>[/options]     register a passkey, only with a one-time token from `opa-broker enroll`
 //   POST /enroll/<token>               (stored as a hash in enroll.json, 15 minutes, spent on first use)
 //   GET  /static/...                   the page's script and styles, and @simplewebauthn/browser
@@ -42,6 +44,7 @@ const HEADERS = {
   'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store',
 };
 const sha = (s) => createHash('sha256').update(s).digest('hex');
+const REVOCABLE = new Set(['approved', 'consumed']);   // a spent one-shot grant too: that stops declarations of its act
 
 /** Opens enrollment for one passkey: writes enroll.json (the token's hash) and returns the token. */
 export function openEnrollment(stateDir, now = Date.now()) {
@@ -108,7 +111,7 @@ export class PasskeyApproval {
     }
     if (req.method === 'GET' && path === '/') return html(res, 200, page('Approvals', '<h1>Approvals</h1><p>Open the link your agent sent you to see what it is asking for.</p>'));
     // A short link (/a/<code>) is the same page as the long one (/approve/<grant_id>).
-    let m = path.match(new RegExp(`^/approve/(${ULID})(/options|/decline|/details)?$`)) ?? path.match(/^\/a\/([0-9A-HJKMNP-TV-Z]{10})(\/options|\/decline|\/details)?$/);
+    let m = path.match(new RegExp(`^/approve/(${ULID})(/options|/decline|/details|/revoke)?$`)) ?? path.match(/^\/a\/([0-9A-HJKMNP-TV-Z]{10})(\/options|\/decline|\/details|\/revoke)?$/);
     if (m) {
       const [, key, sub] = m;
       const id = key.length === 10 ? (this.#broker.grants.byCode(key)?.grant_id ?? 'unknown') : key;
@@ -117,6 +120,7 @@ export class PasskeyApproval {
       if (req.method === 'GET' && sub === '/details') return this.#details(res, id);
       if (req.method === 'POST' && !sub) return this.#approve(req, res, id, origin);
       if (req.method === 'POST' && sub === '/decline') return this.#decline(res, id);
+      if (req.method === 'POST' && sub === '/revoke') return this.#revoke(res, id);
     }
     m = path.match(/^\/enroll\/([A-Za-z0-9_-]{32})(\/options)?$/);
     if (m) {
@@ -197,6 +201,13 @@ export class PasskeyApproval {
     if (!g || g.state !== 'pending') return send(res, 410, { ok: false, error: 'not_pending', message: `this request is ${g?.state ?? 'unknown'}` });
     this.#broker.decide(id, false);
     return send(res, 200, { ok: true, grant_id: id, state: 'denied' });
+  }
+
+  async #revoke(res, id) {
+    const g = this.#grant(id);
+    if (!g || !REVOCABLE.has(g.state)) return send(res, 410, { ok: false, error: 'not_revocable', message: `this request is ${g?.state ?? 'unknown'}` });
+    await this.#broker.revoke(id, 'revoked on the approval page', 'person');
+    return send(res, 200, { ok: true, grant_id: id, state: 'revoked' });
   }
 
   #tokenOk(token) {
@@ -354,7 +365,11 @@ ${callRow(g) ? `<dt>${callRow(g)[0]}</dt><dd><code>${esc(callRow(g)[1])}</code><
 function endedPage(g) {
   const said = { approved: 'You approved this.', denied: 'You declined this.', expired: 'This request ran out before it was approved, or its time is up.',
     revoked: 'This was revoked.', consumed: 'This was approved and has been used.' }[g.state] ?? `This request is ${g.state}.`;
-  return page('Nothing to approve', `<h1>${esc(said)}</h1><p>${esc(g.summary)}</p><p class="grant">Request <code>${esc(g.grant_id)}</code></p>`);
+  const revoke = !REVOCABLE.has(g.state) ? '' : `
+<button id="revoke" type="button" class="secondary">${g.state === 'consumed' ? 'Revoke (your agent can no longer say it did this for you)' : 'Revoke now'}</button>
+<p id="status" role="status"></p>`;
+  return page('Nothing to approve', `<h1>${esc(said)}</h1><p>${esc(g.summary)}</p>${revoke}<p class="grant">Request <code>${esc(g.grant_id)}</code></p>`,
+    revoke ? ` data-mode="revoke" data-grant="${esc(g.grant_id)}"` : '');
 }
 
 function enrollPage(token, rpId) {
