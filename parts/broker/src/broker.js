@@ -60,11 +60,15 @@ export class Broker {
       await this.#endSessions(g);
       this.onGrantEvent(g.grant_id, 'expired', g.errand_id);
     }
+    // ...and any session still open under a grant that's no longer live (a one-shot grant spent outside #use, say).
+    const ended = new Set([...this.sessions.values()].map((s) => s.grant_id).filter((id) => this.grants.get(id).state !== 'approved'));
+    for (const id of ended) await this.#endSessions(this.grants.get(id));
   }
 
   async #endSessions(g) {
     // A code slot waiting under this grant ends with it (and so can't be filled after a revocation).
-    this.#cancelSlots((s) => s.grant_id === g.grant_id, new BrokerError(g.state === 'revoked' ? 'grant_revoked' : 'grant_expired', `${g.grant_id} is ${g.state}`));
+    const code = { revoked: 'grant_revoked', consumed: 'grant_consumed' }[g.state] ?? 'grant_expired';
+    this.#cancelSlots((s) => s.grant_id === g.grant_id, new BrokerError(code, `${g.grant_id} is ${g.state}`));
     const ids = [...this.sessions].filter(([, s]) => s.grant_id === g.grant_id).map(([sid]) => sid);
     // ...and so does one waiting on a session this grant opened (the slot may be under another grant).
     this.#cancelSlots((s) => ids.includes(s.session_id), new BrokerError('bad_request', 'the session closed'));
@@ -92,9 +96,11 @@ export class Broker {
     return e;
   }
 
-  #use(g, detail) {
+  async #use(g, detail) {
     this.grants.use(g);
     this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail });
+    // A one-shot grant is spent by its use, and a session lives no longer than its grant.
+    if (g.mode === 'one_shot') await this.#endSessions(g);
   }
 
   /**
@@ -295,12 +301,12 @@ export class Broker {
           if (e.local) { this.grants.release(g, token); throw this.#refuse(req.errand_id, grant_id, new BrokerError('bad_request', e.message)); }
           // Only a definite refusal (the tool says nothing happened, e.g. HTTP 4xx) gives the grant back; anything
           // else (5xx, timeout, connection lost) might have gone through, so a one-shot grant counts as used.
-          if (e.definite) this.grants.release(g, token); else if (g.mode === 'one_shot') this.grants.use(g);
+          if (e.definite) this.grants.release(g, token); else if (g.mode === 'one_shot') { this.grants.use(g); await this.#endSessions(g); }
           // The relying party's own explanation (never a secret: it's what the site sent back), so the agent can act on it.
           this.log.append({ errand_id: req.errand_id ?? null, type: 'grant.used', grant_id, detail: { op: t.op, server, tool, status: e.definite ? 'refused' : 'unknown', reason: String(e.message).slice(0, 200) } });
           throw new BrokerError('upstream_error', `${server}/${tool}: ${String(e.message).slice(0, 300)}`, e.upstream ? { upstream: e.upstream } : undefined);
         }
-        this.#use(g, { op: t.op, server, tool, status: 'ok' });
+        await this.#use(g, { op: t.op, server, tool, status: 'ok' });
         return { content };
       },
 
@@ -319,7 +325,7 @@ export class Broker {
             throw e;
           }
           this.sessions.set(r.session_id, { grant_id: g.grant_id, url: a.url });
-          this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'open', url: a.url, read_only, mode: this.#mode(g), conforming: true, status: 'ok' });
+          await this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'open', url: a.url, read_only, mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } finally { this.grants.release(g, h.token); }
       },
@@ -330,7 +336,7 @@ export class Broker {
           await guard(req, a.grant_id, () => this.#session(g, a.session_id));
           this.#still(req, h, BROWSE, a.session_id);
           const r = await this.worker.extract(a);
-          this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'extract', target: a.target, mode: this.#mode(g), conforming: true, status: 'ok' });
+          await this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'extract', target: a.target, mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } finally { this.grants.release(g, h.token); }
       },
@@ -360,14 +366,14 @@ export class Broker {
           // Refused before anything was submitted: the grant goes back. Anything else may have submitted: spent.
           // (Not navigation_failed or blocked_by_site: a submit can lose its answer or be redirected after it commits.)
           const before = ['constraint_mismatch', 'target_not_found', 'session_not_found', 'read_only_session', 'origin_mismatch'].includes(e?.code);
-          if (held) { if (before) this.grants.release(held.g, held.token); else this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: String(e?.message).slice(0, 200) }); }
+          if (held) { if (before) this.grants.release(held.g, held.token); else await this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: String(e?.message).slice(0, 200) }); }
           if (e?.code === 'constraint_mismatch') throw this.#refuse(req.errand_id, a.book_grant_id || a.grant_id, new BrokerError('constraint_mismatch', e.message));
           throw e;
         }
         if (held && !r.binding) this.grants.release(held.g, held.token);
         if (r.binding) {
           const conf = /Confirmation (\S+)/.exec(r.page.text)?.[1];
-          this.#use(r.binding, { op: r.binding.ops.find((o) => BINDING_OPS.has(o)), browser: 'act', target: a.target, mode: this.#mode(r.binding),
+          await this.#use(r.binding, { op: r.binding.ops.find((o) => BINDING_OPS.has(o)), browser: 'act', target: a.target, mode: this.#mode(r.binding),
             conforming: true, ...(conf ? { confirmation: conf } : {}), page_title: r.page.title, status: 'ok' });
         }
         return { page: r.page };
@@ -379,7 +385,7 @@ export class Broker {
           await guard(req, a.grant_id, () => this.#session(g, a.session_id));
           this.#still(req, h, 'login', a.session_id);
           const r = await this.worker.await_login(a);
-          this.#use(g, { op: 'login', login_mode: 'operator_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
+          await this.#use(g, { op: 'login', login_mode: 'operator_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } finally { this.grants.release(g, h.token); }
       },
@@ -403,7 +409,7 @@ export class Broker {
           });
           this.#still(req, h, 'login', a.session_id);
           const r = await this.worker.fill_login({ grant_id: a.grant_id, session_id: a.session_id, credential: c ? c.record.ref : g.credential });
-          this.#use(g, c ? { op: 'login', domain: g.domain, credential_ref: c.record.ref, login_mode: 'broker_filled', store_approval, mode: this.#mode(g), conforming: true, status: 'ok' }
+          await this.#use(g, c ? { op: 'login', domain: g.domain, credential_ref: c.record.ref, login_mode: 'broker_filled', store_approval, mode: this.#mode(g), conforming: true, status: 'ok' }
             : { op: 'login', credential: g.credential, login_mode: 'broker_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } finally { this.grants.release(g, h.token); }
@@ -437,7 +443,7 @@ export class Broker {
           // Waiting may have taken minutes: the grant and the session must still be live when the code is filled.
           this.#still(req, h, 'login', a.session_id);
           const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
-          this.#use(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
+          await this.#use(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
         } finally { this.grants.release(g, h.token); }
       },

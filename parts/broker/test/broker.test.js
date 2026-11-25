@@ -582,3 +582,25 @@ test('a one-shot grant is used once by concurrent browser calls too', async () =
   assert.equal(b.grants.get(read2).in_flight, undefined);
   assert.equal(await code(h['browser.open']({ grant_id: read2, url: 'https://table.example/' }, env('x', {}))), 'ok');
 });
+
+test('a spent one-shot grant\'s sessions close with it, and the sweep closes any left over', async () => {
+  const closed = [];
+  const worker = { mode: 'agent_browser', open: async () => ({ session_id: 'o1', page: { title: 'Bookings' } }), close: async ({ session_id }) => { closed.push(session_id); return {}; } };
+  const { b, h } = mk(tmp(), { worker });
+  const ask = async (ops, mode = 'one_shot') => { const g = await h['grant.request']({ credential: 'fake-table', ops, mode, ttl_seconds: 600, purpose: 'p' }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const once = await ask(['read']);
+  const r = await h['browser.open']({ grant_id: once, url: 'https://table.example/' }, env('x', {}));
+  assert.equal(r.page.title, 'Bookings');                  // the open was the grant's one use, and the core has its page
+  assert.equal(b.grants.get(once).state, 'consumed');
+  assert.deepEqual(closed, ['o1']);
+  assert.equal(b.sessions.size, 0);                       // no other grant can drive it now
+  const standing = await ask(['search'], 'standing');
+  await assert.rejects(h['browser.extract']({ grant_id: standing, session_id: 'o1', target: 'x' }, env('x', {})), { code: 'origin_mismatch' });
+  // Spent some other way (an unknown outcome at a tool, say) with a session still open under it: the sweep closes it.
+  const other = await ask(['read']);
+  b.sessions.set('left', { grant_id: other, url: 'https://table.example/' });
+  b.grants.use(b.grants.get(other));
+  await b.sweep();
+  assert.deepEqual(closed, ['o1', 'left']);
+  assert.equal(b.sessions.size, 0);
+});
