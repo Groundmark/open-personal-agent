@@ -1,6 +1,7 @@
 :root { --bg: #F4EEE2; --fg: #1B2230; --muted: #6b6458; --me: #1B2230; --me-fg: #F4EEE2; --them: #ffffff; --line: #e2d9c8; --accent: #2F8F63; --accent-fg: #fff; --warn: #D64B3A; }
 @media (prefers-color-scheme: dark) { :root { --bg: #14181F; --fg: #ECE6DA; --muted: #9a9384; --me: #D9A441; --me-fg: #14181F; --them: #222833; --line: #2e3542; --accent: #3FAE7B; --accent-fg: #0f1a14; } }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }   /* the page hides and shows parts with the hidden attribute; no display rule may override it */
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.4 -apple-system, system-ui, sans-serif; display: flex; flex-direction: column; }
 header { display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--line); }
