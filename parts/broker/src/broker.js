@@ -308,8 +308,14 @@ export class Broker {
         let held = null;
         if (a.book_grant_id) {
           held = await guard(req, a.book_grant_id, async () => {
-            const bg = this.grants.usable(a.book_grant_id);
+            let bg = this.grants.usable(a.book_grant_id);
             if (bg.mode !== 'one_shot' || !bg.ops.some((o) => BINDING_OPS.has(o))) throw new BrokerError('one_shot_required', 'a binding click needs a one-shot grant');
+            // The worker checks the page against these (browser-worker.md), for a pay click as for a booking.
+            const c = bg.constraints ?? {};
+            if (!(c.venue && c.date && c.time && Number.isInteger(c.party_size))) throw new BrokerError('constraint_mismatch', 'a binding click needs a grant with venue, date, time and party_size to check the page against');
+            // Approved for one site, spent on that site: the session must be on the book grant's origin too.
+            await this.#session(bg, a.session_id);
+            bg = this.grants.usable(a.book_grant_id);   // again after the lookup, and taken in the same tick
             return { g: bg, token: this.grants.reserve(bg) };
           });
         }

@@ -466,3 +466,28 @@ test('the approval page and the chat card show every constraint a binding call w
   assert.equal(rows.Changes, '[{"item":"coffee","quantity":1,"price":1000}]');
   assert.equal(Object.fromEntries(constraintRows({ changes: [{ item: 'coffee', quantity: 2 }, { skip: '2026-12-04' }] })).Changes, 'coffee: 2; skip 2026-12-04');
 });
+
+test('browser binding click: the book or pay grant must be for the session\'s site and carry what the page is checked against', async () => {
+  let acts = 0;
+  const worker = { mode: 'agent_browser', open: async () => ({ session_id: 'o1', page: {} }), act: async () => { acts += 1; return { page: { title: 'x', text: '' }, binding: null }; } };
+  const sites = { 'fake-table': 'https://table.example', 'other-site': 'https://other.example' };
+  const store2 = { approval: 'none', label: 't', async get(ref) { return sites[ref] ? { record: { ref, origin: sites[ref] }, secret: {} } : null; } };
+  const { b, h } = mk(tmp(), { worker, store: store2 });
+  const ask = async (a) => { const g = await h['grant.request']({ mode: 'one_shot', ttl_seconds: 600, purpose: 'p', ...a }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const look = await ask({ credential: 'other-site', ops: ['search'], mode: 'standing' });
+  const { session_id } = await h['browser.open']({ grant_id: look, url: 'https://other.example/' }, env('x', {}));
+  const act = (book_grant_id) => h['browser.act']({ grant_id: look, session_id, action: 'click', target: 'Complete reservation', book_grant_id }, env('x', {})).then(() => 'ok', (e) => e.code);
+  // Approved for table.example, clicked on other.example: refused before the worker runs, and the grant is untouched.
+  const elsewhere = await ask({ credential: 'fake-table', ops: ['book'], constraints: BOOK });
+  assert.equal(await act(elsewhere), 'origin_mismatch');
+  assert.equal(acts, 0);
+  assert.equal(b.grants.get(elsewhere).state, 'approved');
+  assert.equal(b.grants.get(elsewhere).in_flight, undefined);
+  // A pay grant has to carry the booking the page is checked against (browser-worker.md), like book.
+  const bare = await ask({ credential: 'other-site', ops: ['pay'] });
+  assert.equal(await act(bare), 'constraint_mismatch');
+  assert.equal(acts, 0);
+  const pay = await ask({ credential: 'other-site', ops: ['pay'], constraints: BOOK });
+  assert.equal(await act(pay), 'ok');
+  assert.equal(acts, 1);
+});
