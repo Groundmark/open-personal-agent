@@ -1,0 +1,11 @@
+{
+  "name": "@open-personal-agent/channel-signal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Signal channel adapter: the person texts the agent's own Signal number (signal-cli, JSON-RPC).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "bin": { "opa-channel-signal": "src/main.js" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}
