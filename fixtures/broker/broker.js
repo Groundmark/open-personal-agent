@@ -12,6 +12,13 @@ const MAX_TTL = { standing: 7 * 24 * 3600, one_shot: 3600 };
 const BINDING_OPS = new Set(['book', 'edit_order', 'pay']);
 const BROWSE_OPS = ['read', 'search'];
 
+/** Tests: set `next` to 'unknown' or 'refused' and the next fake MCP tool call fails that way (definite or not). */
+export const MCP_FAULT = { next: null };
+const fault = () => {
+  const f = MCP_FAULT.next; MCP_FAULT.next = null;
+  if (f) throw Object.assign(new Error(f === 'refused' ? 'the service refused (HTTP 409)' : 'no answer from the service (timeout)'), { definite: f === 'refused' });
+};
+
 /** A fake reservations MCP server: tools and the op each maps to. */
 export const FAKE_MCP = {
   'fake-reservations': {
@@ -23,7 +30,7 @@ export const FAKE_MCP = {
       },
       book_table: {
         op: 'book',
-        run: (a) => ({ confirmation: 'FM-' + crypto.randomBytes(3).toString('hex').toUpperCase(), ...a }),
+        run: (a) => { fault(); return { confirmation: 'FM-' + crypto.randomBytes(3).toString('hex').toUpperCase(), ...a }; },
       },
     },
   },
@@ -44,8 +51,10 @@ export class BrokerFixture {
     this.approveDelayMs = approveDelayMs;
     this.onGrantEvent = onGrantEvent;
     this.grants = new Map();
-    this.codeSlots = new Map(); // slot_id -> { session_id, resolve, timer }
-    this.onCodeSlot = () => {}; // in-process hook for tests; adapters ask with code.slots
+    this.codeSlots = new Map(); // slot_id -> { session_id, channel, seq, resolve, timer, expires_at }
+    this.slotSeq = 0;           // code.slots cursors count slots opened since this broker started
+    this.bootId = crypto.randomBytes(4).toString('hex');
+    this.channels = new Set();  // channel adapters this broker serves (from listen())
     this.worker = new BrowserWorker({ store, mode: browserMode, getBookGrant: (id) => this.#usableBookGrant(id) });
   }
 
@@ -62,10 +71,23 @@ export class BrokerFixture {
     return g;
   }
 
-  /** A session lives no longer than its grant. */
+  /** A session lives no longer than its grant, and neither does a code slot waiting under it. */
   #endSessions(g) {
+    this.#cancelSlots((s) => s.grant_id === g.grant_id, new ContractError(g.state === 'revoked' ? 'grant_revoked' : 'grant_expired', `${g.grant_id} is ${g.state}`));
+    // ...and one waiting on a session this grant opened, though the slot is under another grant.
+    const ids = [...this.worker.sessions].filter(([, s]) => s.grantId === g.grant_id).map(([id]) => id);
+    this.#cancelSlots((s) => ids.includes(s.session_id), new ContractError('bad_request', 'the session closed'));
     const n = this.worker.closeForGrant(g.grant_id);
     if (n) this.log.append({ errand_id: g.errand_id, type: 'browser.closed_on_grant_end', grant_id: g.grant_id, detail: { sessions: n, state: g.state } });
+  }
+
+  #cancelSlots(match, err) {
+    for (const [slot_id, s] of this.codeSlots) {
+      if (!match(s)) continue;
+      this.codeSlots.delete(slot_id);
+      clearTimeout(s.timer);
+      s.reject(err);
+    }
   }
 
   /** ops: one op, or a list of which any one will do. */
@@ -73,6 +95,7 @@ export class BrokerFixture {
     const g = this.#grant(id);
     const bad = { pending: 'grant_not_approved', denied: 'grant_denied', expired: 'grant_expired', revoked: 'grant_revoked', consumed: 'grant_consumed' }[g.state];
     if (bad) throw new ContractError(bad, `${id} is ${g.state}`);
+    if (g.in_flight) throw new ContractError('grant_consumed', `${id} is being used right now`);
     const want = ops ? [].concat(ops) : [];
     if (want.length && !want.some((o) => g.ops.includes(o))) throw new ContractError('op_not_granted', `${want.join('|')} not in [${g.ops}]`);
     return g;
@@ -107,6 +130,13 @@ export class BrokerFixture {
 
   #mode(g) { return g.session ? 'operator_browser' : this.worker.mode; }
 
+  /** Who a declaration under this grant is for: the site the grant is held to, or else the server or credential. */
+  async #relyingParty(g) {
+    const o = await this.#origin(g);
+    if (o) return typeof o === 'string' ? o : o.host;
+    return g.request?.server ?? (typeof g.credential === 'string' ? g.credential : 'unknown');
+  }
+
   #usableBookGrant(id) {
     try { return this.#requireUsable(id, 'book'); } catch { return null; }
   }
@@ -117,16 +147,26 @@ export class BrokerFixture {
   }
 
   #consume(g, detail) {
+    delete g.in_flight;
     g.uses += 1;
     g.last_used_at = nowIso();
-    if (g.mode === 'one_shot') g.state = 'consumed';
+    if (g.mode === 'one_shot' && g.state === 'approved') g.state = 'consumed';   // revoked meanwhile stays revoked
     this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail });
   }
 
-  /** Stand-in for the person approving on the passkey page. */
+  /** What the passkey signs: everything the approval page shows. */
+  #hash(g) {
+    return crypto.createHash('sha256').update(canonical({
+      grant_id: g.grant_id, credential: g.credential, session: g.session, credential_ref: g.credential_ref, operator_present: g.operator_present,
+      ops: g.ops, constraints: g.constraints ?? null, mode: g.mode, ttl_seconds: g.ttl_seconds, purpose: g.purpose, summary: g.summary, request: g.request,
+    })).digest('hex');
+  }
+
+  /** Stand-in for the person approving on the passkey page. The approval is bound to the hash shown when it was asked for. */
   approve(grantId, approve = true) {
     const g = this.#grant(grantId);
     if (g.state !== 'pending') return;
+    if (approve && this.#hash(g) !== g.hash) throw new ContractError('constraint_mismatch', 'the grant changed after it was shown to the person');
     g.state = approve ? 'approved' : 'denied';
     g.approved_at = approve ? nowIso() : null;
     g.expires_at = approve ? new Date(Date.now() + g.ttl_seconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z') : null;
@@ -182,24 +222,28 @@ export class BrokerFixture {
         const target = bySite
           ? (found ? `your login ${found.record.username} for ${a.credential.domain}` : `a login for ${a.credential.domain} from your vault (your vault will ask you which)`)
           : a.credential ?? `your signed-in ${new URL(a.session.origin).host} session`;
-        const summary = a.ops.includes('book')
+        // The approval page (here, its summary) shows every constraint and the call, as well as the familiar fields.
+        const every = Object.entries(a.constraints ?? {}).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('; ');
+        const summary = (a.ops.includes('book')
           ? `Book ${a.constraints.venue}, ${a.constraints.date} at ${a.constraints.time}, ${a.constraints.party_size} people, using ${target}.`
-          : `Let the agent ${a.ops.join(' and ')} with ${target} for ${Math.round(a.ttl_seconds / 3600)} h: ${a.purpose}`;
+          : `Let the agent ${a.ops.join(' and ')} with ${target} for ${Math.round(a.ttl_seconds / 3600)} h: ${a.purpose}`)
+          + (request ? ` Calls ${request.server}/${request.tool}.` : '') + (every ? ` Everything it may send: ${every}.` : '');
         const g = {
           grant_id, errand_id: req.errand_id, credential: a.credential ?? null, session: a.session ?? null,
           domain: bySite ? a.credential.domain : null, credential_ref, operator_present: !!a.operator_present, ops: a.ops, constraints: a.constraints, mode: a.mode,
           ttl_seconds: a.ttl_seconds, purpose: a.purpose, state: 'pending', uses: 0, approved_at: null, expires_at: null, last_used_at: null, request,
         };
-        g.hash = crypto.createHash('sha256').update(canonical({ grant_id, credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, request })).digest('hex');
+        g.summary = summary;
+        g.hash = this.#hash(g);
         this.grants.set(grant_id, g);
         this.log.append({ errand_id: req.errand_id, type: 'grant.requested', grant_id, detail: { credential: g.credential, session: g.session, ops: a.ops, constraints: a.constraints, mode: a.mode, purpose: a.purpose } });
         if (this.autoApprove) setTimeout(() => this.approve(grant_id), this.approveDelayMs);
-        return { grant_id, state: 'pending', approve_url: `http://127.0.0.1/approve/${grant_id}`, summary, ...(credential_ref ? { credential_ref } : {}) };
+        return { grant_id, state: 'pending', approve_url: `http://127.0.0.1/approve/${grant_id}`, summary, ...(credential_ref ? { credential_ref } : {}), ...(request ? { request } : {}) };
       },
 
       'grant.status': async ({ grant_id }) => {
         const g = this.#grant(grant_id);
-        return { grant_id, state: g.state, approved_at: g.approved_at, expires_at: g.expires_at, uses: g.uses, last_used_at: g.last_used_at };
+        return { grant_id, state: g.state, approved_at: g.approved_at, expires_at: g.expires_at, uses: g.uses, last_used_at: g.last_used_at, ...(g.request ? { request: g.request } : {}) };
       },
 
       'grant.revoke': async ({ grant_id, reason }) => {
@@ -223,9 +267,20 @@ export class BrokerFixture {
             if (!g.request || g.request.server !== server || g.request.tool !== tool) throw new ContractError('constraint_mismatch', 'not the call that was approved');
             if (canonical(args ?? {}) !== canonical(g.constraints ?? {})) throw new ContractError('constraint_mismatch', 'arguments differ from the approved grant');
           }
+          if (g.mode === 'one_shot') g.in_flight = true;   // taken before anything is awaited: a concurrent call gets grant_consumed
         } catch (e) { throw this.#refuse(req.errand_id, grant_id, e); }
-        await this.store.get(srv.credential); // the token is used here and goes no further
-        const content = t.run(args);
+        try { await this.store.get(srv.credential); } catch (e) { delete g.in_flight; throw e; }   // the token is used here and goes no further
+        let content;
+        try { content = t.run(args); } catch (e) {
+          // An unknown outcome (timeout, lost connection, 5xx) might have gone through: a one-shot grant counts as used,
+          // and the core tells the person instead of retrying. Only a definite refusal gives the grant back.
+          if (!e.definite && g.mode === 'one_shot') this.#consume(g, { op: t.op, server, tool, status: 'unknown', reason: e.message });
+          else {
+            delete g.in_flight;   // nothing happened: the grant is free again
+            this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail: { op: t.op, server, tool, status: e.definite ? 'refused' : 'unknown', reason: e.message } });
+          }
+          throw new ContractError('upstream_error', `${server}/${tool}: ${e.message}`);
+        }
         this.#consume(g, { op: t.op, server, tool, args, status: 'ok' });
         return { content };
       },
@@ -308,47 +363,71 @@ export class BrokerFixture {
           if (!code) throw this.#refuse(req.errand_id, a.grant_id, new ContractError('op_not_granted', 'this login has no TOTP in the store'));
         } else {
           if ([...this.codeSlots.values()].some((s) => s.session_id === a.session_id)) throw new ContractError('bad_request', 'a code slot is already open for this session');
+          // The slot is for the channel the person is talking on; with more than one adapter, the core must say which.
+          if (a.channel === undefined && this.channels.size > 1) throw new ContractError('bad_request', 'more than one channel adapter: name the one the person is on (channel)');
+          if (a.channel !== undefined && !this.channels.has(a.channel)) throw new ContractError('bad_request', `no channel adapter ${a.channel}`);
+          const channel = a.channel ?? [...this.channels][0] ?? null;
           const slot_id = ulid();
           const ms = (a.timeout_seconds ?? 300) * 1000;
           code = await new Promise((resolve, reject) => {
             const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new ContractError('code_timeout', 'no code from the person')); }, ms);
             const expires_at = new Date(Date.now() + ms).toISOString();
-            this.codeSlots.set(slot_id, { session_id: a.session_id, resolve, timer, expires_at });
-            this.onCodeSlot({ slot_id, account_id: 'paired', expires_at });
+            this.codeSlots.set(slot_id, { session_id: a.session_id, grant_id: g.grant_id, channel, seq: ++this.slotSeq, resolve, reject, timer, expires_at });
           }).catch((e) => { throw this.#refuse(req.errand_id, a.grant_id, e); });
         }
+        // Waiting may have taken minutes: the grant must still be live when the code is filled.
+        try { this.#requireUsable(a.grant_id, 'login'); } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
         const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
         this.#consume(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
         return r;
       },
 
-      'code.slots': async ({ wait_seconds = 50 } = {}) => {
-        const open = () => [...this.codeSlots].map(([slot_id, s]) => ({ slot_id, expires_at: s.expires_at }));
-        for (const until = Date.now() + Math.min(wait_seconds, 60) * 1000; !open().length && Date.now() < until;) await new Promise((r) => setTimeout(r, 50));
-        return { slots: open() };
+      // A long poll, with a cursor so the adapter hears of each slot once, and only of slots for its own channel.
+      'code.slots': async ({ wait_seconds = 50, cursor } = {}, req) => {
+        if (!Number.isInteger(wait_seconds) || wait_seconds < 0 || wait_seconds > 60) throw new ContractError('bad_request', 'wait_seconds is an integer from 0 to 60');
+        if (cursor !== undefined && typeof cursor !== 'string') throw new ContractError('bad_request', 'cursor is a string');
+        const [boot, n] = (cursor ?? '').split('.');
+        const after = boot === this.bootId && /^\d+$/.test(n) ? Number(n) : 0;   // unknown cursor: every open slot
+        const channel = req.caller.slice('channel-'.length);
+        const fresh = () => [...this.codeSlots].filter(([, s]) => s.seq > after && s.channel === channel)
+          .map(([slot_id, s]) => ({ slot_id, expires_at: s.expires_at }));
+        for (const until = Date.now() + wait_seconds * 1000; !fresh().length && Date.now() < until;) await new Promise((r) => setTimeout(r, 20));
+        const slots = fresh();
+        const last = slots.length ? Math.max(...slots.map((x) => this.codeSlots.get(x.slot_id).seq)) : after;
+        return { slots, cursor: `${this.bootId}.${last}` };
       },
 
-      'code.deliver': async ({ slot_id, code }) => {
+      'code.deliver': async ({ slot_id, code }, req) => {
+        if (typeof code !== 'string' || !/^[A-Za-z0-9]{4,10}$/.test(code)) throw new ContractError('bad_request', 'a code is 4 to 10 letters and digits');
         const s = this.codeSlots.get(slot_id);
-        if (!s) throw new ContractError('bad_request', 'no open code slot ' + slot_id);
+        if (!s || s.channel !== req.caller.slice('channel-'.length)) throw new ContractError('bad_request', 'no open code slot ' + slot_id);
         this.codeSlots.delete(slot_id);
         clearTimeout(s.timer);
         s.resolve(new Secret(code));
         return { accepted: true };
       },
 
-      'browser.close': async (a) => this.worker.close(a),
-
-      'identity.sign': async ({ purpose, payload_b64 }) => {
-        // 0.4: declarations only, and a declaration is a JSON object. The broker signs requests to relying parties itself.
-        const bytes = Buffer.from(payload_b64 ?? '', 'base64');
-        let obj = null; try { obj = JSON.parse(bytes.toString('utf8')); } catch {}
-        if (purpose !== 'declaration' || !obj || typeof obj !== 'object' || Array.isArray(obj)) throw new ContractError('bad_request', 'identity.sign signs declarations (JSON objects) only');
-        return { kid: this.agentKey.kid, alg: 'Ed25519', sig_b64: signB64(this.agentKey, bytes) };
+      'browser.close': async (a) => {
+        this.#cancelSlots((s) => s.session_id === a.session_id, new ContractError('bad_request', 'the session closed'));
+        return this.worker.close(a);
       },
 
-      'identity.declaration': async ({ relying_party, act, grant_id }, req) => {
-        const declaration = { format: 'opa-draft-0', operator: 'fixture-operator.example', agent_kid: this.agentKey.kid, relying_party, act, grant_id, ts: nowIso() };
+      // 0.4: no identity.sign. The broker builds every declaration itself, for an act an approved grant covers,
+      // taking the relying party and the constraints from the grant, not from the caller.
+      'identity.declaration': async (a, req) => {
+        const { grant_id, act } = a;
+        if (Object.keys(a).some((k) => k !== 'grant_id' && k !== 'act')) throw new ContractError('bad_request', 'identity.declaration takes grant_id and act; the rest comes from the grant');
+        let g;
+        try { g = this.#grant(grant_id); } catch (e) { throw this.#refuse(req.errand_id, grant_id, e); }
+        const relying_party = await this.#relyingParty(g);
+        // Checked just before signing, with nothing awaited in between, so a revocation meanwhile is seen.
+        try {
+          const spent = g.state === 'consumed' && g.mode === 'one_shot' && Date.parse(g.expires_at) > Date.now();
+          if (!spent) this.#requireUsable(grant_id);
+          if (!g.ops.includes(act)) throw new ContractError('op_not_granted', `${act} not in [${g.ops}]`);
+        } catch (e) { throw this.#refuse(req.errand_id, grant_id, e); }
+        const declaration = { format: 'opa-draft-0', operator: 'fixture-operator.example', agent_kid: this.agentKey.kid,
+          relying_party, act, grant_id, constraints: g.constraints ?? null, ts: nowIso() };
         const sig_b64 = signB64(this.agentKey, canonical(declaration));
         this.log.append({ errand_id: req.errand_id, type: 'identity.declaration', grant_id, detail: { declaration, sig_b64, presented: false } });
         return { declaration, kid: this.agentKey.kid, sig_b64, presented: false };
@@ -365,11 +444,14 @@ export class BrokerFixture {
    * the fixture runs as one user, so it checks the field against the socket only.
    */
   listen(socketPath, { caller = 'core' } = {}) {
+    if (caller.startsWith('channel-')) this.channels.add(caller.slice('channel-'.length));
     return serve(socketPath, this.handlers(), {
       authorize: (req) => {
         if (req.caller !== caller) throw new ContractError('unauthorized_caller', `this socket is for ${caller}, not ${req.caller}`);
-        // code.deliver is for channel adapters only (contracts/broker.md).
-        if ((req.op === 'code.deliver' || req.op === 'code.slots') && !caller.startsWith('channel-')) throw new ContractError('unauthorized_caller', 'code.deliver is served only on channel adapters\' sockets');
+        // code.slots and code.deliver are for channel adapters only (contracts/broker.md).
+        if ((req.op === 'code.deliver' || req.op === 'code.slots') && !caller.startsWith('channel-')) throw new ContractError('unauthorized_caller', `${req.op} is served only on channel adapters' sockets`);
+        // A channel adapter's socket serves only these; everything else is the core's.
+        if (caller !== 'core' && !['code.slots', 'code.deliver', 'status'].includes(req.op)) throw new ContractError('unauthorized_caller', `${req.op} is only for the core`);
       },
     });
   }

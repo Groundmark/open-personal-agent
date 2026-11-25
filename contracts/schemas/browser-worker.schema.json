@@ -269,6 +269,10 @@
             "person"
           ]
         },
+        "channel": {
+          "type": "string",
+          "description": "For source person: the channel adapter the person is talking on (its name, e.g. signal). Only that adapter is offered the code slot. Required when the broker serves more than one channel adapter."
+        },
         "timeout_seconds": {
           "type": "integer",
           "minimum": 1,
@@ -279,7 +283,7 @@
         "grant_id",
         "session_id"
       ],
-      "description": "Core to broker: { grant_id, session_id, source, timeout_seconds? }. Broker to worker: { grant_id, session_id, code }.",
+      "description": "Core to broker: { grant_id, session_id, source, channel?, timeout_seconds? }. Broker to worker: { grant_id, session_id, code }.",
       "oneOf": [
         {
           "required": [

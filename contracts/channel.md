@@ -47,7 +47,7 @@ A new phone silences the agent until the person pairs again. That's deliberate, 
 
 When a site sends the person a code (SMS, email), the code comes back over the channel, but it must not reach the core or the model.
 
-- **The broker opens a code slot** ([broker.md](broker.md#browserfill_code)). **The adapter learns of it by asking:** it keeps a `code.slots` call waiting on its own broker socket ([broker.md](broker.md#codeslots-channel-adapters-only)), which returns `{ slots: [{ slot_id, expires_at, account_id? }] }` as soon as a slot opens. (0.3 had the broker tell the adapter, but the adapter is always the caller on that socket, so the broker had no way to start the conversation.)
+- **The broker opens a code slot** for the channel the person is talking on ([broker.md](broker.md#browserfill_code)). **The adapter learns of it by asking:** it keeps a `code.slots` call waiting on its own broker socket ([broker.md](broker.md#codeslots-channel-adapters-only)), which returns `{ slots: [{ slot_id, expires_at, account_id? }], cursor }` as soon as a slot opens. The adapter passes the `cursor` back on its next call, so it hears of each slot once. (0.3 had the broker tell the adapter, but the adapter is always the caller on that socket, so the broker had no way to start the conversation.)
 - **While a slot is open, the adapter checks the paired person's messages.** If one is only a code (4 to 10 letters and digits, optionally with spaces or dashes, which it strips), the adapter sends it to the broker with `code.deliver` instead of `channel.inbound`.
   - It forwards a placeholder to the core instead: `text: "[one-time code delivered]"`.
   - That placeholder is all that reaches `conversation.jsonl`.

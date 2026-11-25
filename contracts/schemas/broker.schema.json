@@ -232,6 +232,9 @@
         },
         "credential_ref": {
           "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/exact_request"
         }
       },
       "required": [
@@ -306,6 +309,9 @@
               "type": "null"
             }
           ]
+        },
+        "request": {
+          "$ref": "#/$defs/exact_request"
         }
       },
       "required": [
@@ -378,60 +384,22 @@
         "content"
       ]
     },
-    "identity.sign.args": {
-      "type": "object",
-      "properties": {
-        "purpose": {
-          "const": "declaration"
-        },
-        "payload_b64": {
-          "type": "string",
-          "contentEncoding": "base64"
-        }
-      },
-      "required": [
-        "purpose",
-        "payload_b64"
-      ]
-    },
-    "identity.sign.result": {
-      "type": "object",
-      "properties": {
-        "kid": {
-          "type": "string"
-        },
-        "alg": {
-          "const": "Ed25519"
-        },
-        "sig_b64": {
-          "type": "string",
-          "contentEncoding": "base64"
-        }
-      },
-      "required": [
-        "kid",
-        "alg",
-        "sig_b64"
-      ]
-    },
     "identity.declaration.args": {
       "type": "object",
       "properties": {
-        "relying_party": {
-          "type": "string"
-        },
-        "act": {
-          "type": "string"
-        },
         "grant_id": {
           "type": "string",
           "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "act": {
+          "type": "string"
         }
       },
       "required": [
-        "relying_party",
+        "grant_id",
         "act"
-      ]
+      ],
+      "additionalProperties": false
     },
     "identity.declaration.result": {
       "type": "object",
@@ -458,6 +426,17 @@
               "type": "string",
               "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
             },
+            "constraints": {
+              "description": "The grant's constraints, as approved.",
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "ts": {
               "type": "string",
               "format": "date-time"
@@ -468,6 +447,7 @@
             "agent_kid",
             "relying_party",
             "act",
+            "grant_id",
             "ts"
           ]
         },
@@ -646,6 +626,10 @@
           "minimum": 0,
           "maximum": 60,
           "default": 50
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque: the cursor the last code.slots result gave. Only slots opened after it are listed."
         }
       },
       "additionalProperties": false
@@ -658,10 +642,15 @@
           "items": {
             "$ref": "#/$defs/code_slot"
           }
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Pass it back on the next call."
         }
       },
       "required": [
-        "slots"
+        "slots",
+        "cursor"
       ]
     },
     "exact_request": {
@@ -692,7 +681,7 @@
       ]
     },
     "code_slot": {
-      "description": "A code slot the broker has open: returned by code.slots on a channel adapter's socket.",
+      "description": "A code slot the broker has open for this channel adapter: returned by code.slots on that adapter's socket.",
       "type": "object",
       "properties": {
         "slot_id": {
