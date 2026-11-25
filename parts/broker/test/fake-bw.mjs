@@ -8,6 +8,10 @@ const items = [
   { id: 'aaaaaaaa-0000-4000-8000-000000000001', type: 1, name: 'Table', collectionIds: [C], login: { username: 'diner@example.test', password: 'FAKE-pass-1', totp: 'JBSWY3DPEHPK3PXP', uris: [{ uri: 'https://www.table.example/login' }] } },
   { id: 'aaaaaaaa-0000-4000-8000-000000000002', type: 1, name: 'Shop a', collectionIds: [C], login: { username: 'a@example.test', password: 'FAKE-pass-2', uris: [{ uri: 'shop.example' }] } },
   { id: 'aaaaaaaa-0000-4000-8000-000000000003', type: 1, name: 'Bank (not shared)', collectionIds: [OTHER], login: { username: 'me', password: 'FAKE-bank', uris: [{ uri: 'https://table.example' }] } },
+  // The phone app saved its own URI first; the web one, on a port, comes after.
+  { id: 'aaaaaaaa-0000-4000-8000-000000000004', type: 1, name: 'NAS', collectionIds: [C], login: { username: 'admin', password: 'FAKE-nas', uris: [{ uri: 'androidapp://com.nas.app' }, { uri: 'https://nas.home:5001/login' }] } },
+  { id: 'aaaaaaaa-0000-4000-8000-000000000005', type: 1, name: 'Router', collectionIds: [C], login: { username: 'admin', password: 'FAKE-router', uris: [{ uri: 'http://192.168.1.1' }] } },
+  { id: 'aaaaaaaa-0000-4000-8000-000000000006', type: 1, name: 'Table app only', collectionIds: [C], login: { username: 'app@example.test', password: 'FAKE-app', uris: [{ uri: 'iosapp://com.table.example' }] } },
 ];
 const out = (v) => { process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v)); process.exit(0); };
 const fail = (m, code = 1) => { process.stderr.write(m); process.exit(code); };
