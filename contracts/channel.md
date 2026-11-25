@@ -1,6 +1,6 @@
 # Channel contract (front end)
 
-**0.3-draft.** Where the person talks to the agent. Every front end (Signal first, iMessage next, a terminal for tests) speaks the same two messages, so swapping one changes nothing else.
+**0.4-draft.** Where the person talks to the agent. Every front end (Signal first, iMessage next, a terminal for tests) speaks the same two messages, so swapping one changes nothing else.
 
 ## Messages
 
@@ -47,7 +47,7 @@ A new phone silences the agent until the person pairs again. That's deliberate, 
 
 When a site sends the person a code (SMS, email), the code comes back over the channel, but it must not reach the core or the model.
 
-- **The broker opens a code slot** ([broker.md](broker.md#browserfill_code)) and tells the adapter: `{ slot_id, account_id, expires_at }`, on the adapter's own broker socket.
+- **The broker opens a code slot** for the channel the person is talking on ([broker.md](broker.md#browserfill_code)). **The adapter learns of it by asking:** it keeps a `code.slots` call waiting on its own broker socket ([broker.md](broker.md#codeslots-channel-adapters-only)), which returns `{ slots: [{ slot_id, expires_at, account_id? }], cursor }` as soon as a slot opens. The adapter passes the `cursor` back on its next call, so it hears of each slot once. (0.3 had the broker tell the adapter, but the adapter is always the caller on that socket, so the broker had no way to start the conversation.)
 - **While a slot is open, the adapter checks the paired person's messages.** If one is only a code (4 to 10 letters and digits, optionally with spaces or dashes, which it strips), the adapter sends it to the broker with `code.deliver` instead of `channel.inbound`.
   - It forwards a placeholder to the core instead: `text: "[one-time code delivered]"`.
   - That placeholder is all that reaches `conversation.jsonl`.
@@ -61,6 +61,7 @@ When a site sends the person a code (SMS, email), the code comes back over the c
 - **A message is never a confirmation of a binding act.** Bookings and payments are confirmed with a passkey through the broker ([broker.md](broker.md)). The channel only carries the link.
 - **One adapter owns the account.** Some channels hand each message to whoever asks first (Signal's `receive` consumes what it returns). Only the adapter may receive for the agent's account: run it as the account's single long-lived client (for signal-cli, `daemon` or `jsonRpc` mode), and never run a second receiver beside it.
 - **The agent's account has a profile name,** so the person can tell it apart, for example "Sam's agent".
+- **The account belongs to the agent, not to the person or the provider.** For Signal that means a number of the agent's own: a cheap VoIP number that only the agent uses is enough, not a second phone for the person. Because it's the agent's, the agent keeps it when it moves to another provider or host.
 
 ## Errors
 

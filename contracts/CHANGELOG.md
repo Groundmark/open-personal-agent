@@ -1,5 +1,61 @@
 # Contracts changelog
 
+## 0.4-draft, 2026-11-24
+
+From building every part except the browser worker and context gateway against 0.3, and running the agent end to end: a booking at a demo restaurant that verifies the agent's Groundmark signature, approved with a passkey from a phone.
+
+### Broker
+
+- **The broker signs only what the person approved, and the approval covers the exact request.**
+  - **`identity.sign` is gone (breaking).** A relying party takes what the agent's key signs as the agent's own act. If the core could get any request signed, a compromised core could book or buy with no grant; if it could get any declaration signed, it could claim "the agent did X" for something nobody approved. The broker now signs only what it builds itself, under a grant.
+  - **`identity.declaration` needs an approved act (breaking).** args are now `{ grant_id, act }`. The grant must be approved, unexpired and not revoked, and `act` one of its ops; a one-shot grant also qualifies once spent on that act, until it would have expired. The broker takes the relying party and the constraints from the grant, not from the caller, and checks the grant just before it signs.
+  - **A spent one-shot grant can be revoked,** which stops declarations of its act. A grant revoked while a call is in flight stays revoked.
+  - **Relying parties that verify the agent** (new section). The broker calls them itself over HTTPS and signs each request as the agent (RFC 9421, the key at `_agentid.<agent domain>`). The core reaches them with `mcp.call`, like an MCP server. Under a standing grant the broker signs only `GET`s, for `read` and `search`. A broker refuses to start with any other method configured for a non-binding tool.
+  - **Exact request.** For a binding op made by a tool, the broker fixes the one call the grant allows when it creates the grant: server and tool, and for a relying party the method, URL and body digest (the body is the arguments as canonical JSON). The passkey approves it with the rest of the grant, and the approval page shows all of it: every constraint, and the call. At use, `mcp.call` must be that call, and the request the broker would send must still equal it (`constraint_mismatch` otherwise). This catches a configuration that changed between approval and use. A binding grant with no exact request can't be used for a binding tool.
+  - **Reads stay reads.** A relying party's arguments can't replace query parameters fixed in its configured path, and the contract says `GET` alone isn't enough: read tools must point at endpoints that stay read-only for any arguments.
+  - New `grant.request` arg `call: { server, tool }`, needed only when more than one tool could make the act. `grant.request` and `grant.status` return the exact request as `request`.
+  - **The passkey covers everything the approval page shows,** now spelled out: `ttl_seconds`, `purpose`, `operator_present`, the login item once known, and the summary, as well as the credential, ops, constraints, mode and exact request.
+- **An unknown outcome spends a one-shot grant.** Only a definite refusal (for HTTP, a 4xx other than 408 and 429) gives it back. After a timeout, a lost connection or a 5xx the core tells the person it couldn't confirm the outcome, and never retries on its own.
+- **`code.slots`** (channel adapters' sockets only): how an adapter learns a code slot opened. 0.3 had the broker tell the adapter, but the adapter is always the caller on its socket, so the broker couldn't start that conversation. The adapter long-polls: `code.slots { wait_seconds, cursor }` → `{ slots: [{ slot_id, expires_at, account_id? }], cursor }`.
+  - **A cursor,** so the adapter hears of each slot once instead of getting the same open slot back on every poll. It's opaque, and survives slots closing; one from before a broker restart lists every open slot.
+  - **One adapter per slot.** `browser.fill_code` with `source: "person"` takes `channel`, the adapter the person is talking on (required when the broker serves more than one). Only that adapter is told of the slot or can fill it.
+  - `wait_seconds` outside 0 to 60 is refused (`bad_request`), not clamped.
+  - **A slot ends with its grant** (revoked, expired, or its session closed), and the broker checks the grant and session again before filling a code.
+  - A channel adapter's socket serves only `code.slots`, `code.deliver` and `status` (now said in the contract).
+  - The schema's `code_slot.opened` becomes `code_slot`.
+- **The Bitwarden service-account store runs the `bw` command once per request, never `bw serve`.** `bw serve`'s local API has no authentication, so any program on the machine, the core included, could read the vault through it. The contract now says where the unlocked vault lives and who can read it:
+  - the session key in the broker's memory only, handed to each `bw` command in its environment;
+  - the account's encrypted data in the broker's `0700` directory;
+  - the password and API key read at start from files only the broker can read.
+
+  So the broker's own user and root can read it, and no other part can. The trade-off: it stays unlocked until the broker stops.
+
+### Channel
+
+- **One-time codes:** the adapter learns of a slot with `code.slots`, passing back the cursor it was last given. It's told only of slots opened for its own channel.
+- **The account belongs to the agent.** For Signal, that's a number of the agent's own (a cheap VoIP number only the agent uses), not a second phone for the person. The agent keeps it when it moves to another provider.
+
+### Fixtures
+
+- The broker fixture follows every 0.4 rule above:
+  - `code.slots` with a cursor and per-channel slots, and the terminal channel fixture long-polls it (the errand runs through it end to end);
+  - `identity.declaration` checks the grant;
+  - an unknown outcome spends a one-shot grant;
+  - the exact call of a binding grant (`call`), with every argument compared;
+  - a summary that names the call and every constraint, and a grant hash over everything shown;
+  - `code.deliver` refuses anything but 4 to 10 letters and digits, and leaves the slot open;
+  - one-shot grants are reserved before any asynchronous work, so two concurrent calls can't both use one;
+  - a channel adapter's socket is refused everything but `code.slots`, `code.deliver` and `status`.
+- New tests: `code.slots` (each slot heard of once; only the right adapter; refused on the core's socket; bad `wait_seconds`), `identity.declaration` (refused without an approved act; allowed after the act), the unknown-outcome rule (a failed booking can't be retried; a definite refusal can), a binding call that adds an argument nobody approved, and the summary and hash.
+
+### Background errands with a personal vault: decided in 0.3, changed here
+
+0.3 decided on a narrow `bw serve` account for recurring errands. It's now the same narrow service account, reached through the `bw` command per request. The questions to settle before building recurring errands stay open: what may go in the collection, and whether checkout on a recurring errand needs a fresh one-shot grant.
+
+### Still open
+
+The rest of 0.3's list: one tap instead of two with a vault that prompts on its own; sign-in links sent by email; and from 0.2, read-only enforcement in `operator_browser` mode, a Playwright worker fixture and an MCP wire fixture, and which op a non-final, state-changing click on an ordinary site needs.
+
 ## 0.3-draft, 2026-11-23
 
 From a live test of fetching a login from the person's own password manager (Bitwarden Agent Access against a self-hosted Vaultwarden, dummy items only), and from comparing how shipped personal agents handle logins.

@@ -78,8 +78,7 @@ export async function startAll(dir, { storeOpts } = {}) {
   const context = new ContextFixture({ logPath: path.join(dir, 'context-reads.jsonl') });
   const contextServer = await context.listen(sock('context'));
   const channel = new TerminalChannel({ coreSocket: sock('core'), print: false });
-  channel.brokerSocket = sock('broker-channel-terminal');
-  broker.onCodeSlot = (slot) => channel.openCodeSlot(slot);
+  channel.watchSlots(sock('broker-channel-terminal'));   // the adapter long-polls code.slots, as a real one does
   const channelServer = await channel.listen(sock('channel'));
   const router = await startRouter({ script: SCRIPT });
 
@@ -91,6 +90,7 @@ export async function startAll(dir, { storeOpts } = {}) {
 
   const waitFor = (grantId) => new Promise((resolve) => waiters.set(grantId, resolve));
   const stop = async () => {
+    await channel.stop();
     for (const s of [coreServer, brokerServer, brokerChannelServer, contextServer, channelServer]) s.close();
     await router.close(); await site.close();
     if (sockDir !== dir) fs.rmSync(sockDir, { recursive: true, force: true });
@@ -151,14 +151,15 @@ export async function standInCore(env, { log = () => {} } = {}) {
     await act('click', 'Sign in');
   }
 
-  // 5. Log the declaration this agent would present, though the site can't receive one.
-  await B('identity.declaration', { relying_party: site.origin, act: 'book', grant_id: g });
-
   // 6. One-shot booking grant for exactly this option; the person approves with a passkey.
   const book = await B('grant.request', { credential: 'fake-table', ops: ['book'], constraints: { venue: want.venue, date: want.date, time: want.time, party_size: want.party_size }, mode: 'one_shot', ttl_seconds: 900, purpose: 'Book this table' });
   const s2 = waitFor(book.grant_id);
   await say(`${book.summary} Approve with your passkey: ${book.approve_url}`);
   if ((await s2) !== 'approved') throw new Error('booking grant not approved');
+
+  // Log the declaration this agent would present, though the site can't receive one. The broker builds it from the
+  // approved booking grant (contracts 0.4), so it can only declare an act the person approved.
+  await B('identity.declaration', { grant_id: book.grant_id, act: 'book' });
 
   // 7. The binding click.
   const done = await act('click', 'Complete reservation', undefined, { book_grant_id: book.grant_id });
