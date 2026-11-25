@@ -67,17 +67,21 @@ test('a store that asks on the person\'s computer needs them there', () => withE
 }, { approval: 'device_local', listable: false }));
 
 test('a refusal on the store\'s prompt is not_found, logged, and never retried; no answer is its own error', () => withEnv(async (env) => {
-  env.store.prompt.refuse.add('table.example');
-  env.store.prompt.noAnswer.add('shop.example');
-  const g = await approved(env, { ...LOGIN, credential: { domain: 'table.example' }, operator_present: true });
-  const r = await B(env, 'browser.fill_login', { grant_id: g.grant_id, session_id: 'any' });
+  // Sessions are opened through the broker first: a broker may refuse browser calls on sessions it didn't open.
+  env.store.prompt.refuse.add('127.0.0.1');
+  const g = await approved(env, { ...LOGIN, credential: { domain: '127.0.0.1' }, operator_present: true });
+  const { result: { session_id } } = await B(env, 'browser.open', { grant_id: g.grant_id, url: env.site.origin + '/login' });
+  const r = await B(env, 'browser.fill_login', { grant_id: g.grant_id, session_id });
   assert.equal(r.error, 'credential_not_found');
   assert.equal(env.store.fetches, 1);
   const logs = fs.readFileSync(path.join(env.dir, 'actions.jsonl'), 'utf8');
   assert.match(logs, /"status":"not_found","store_approval":"device_local"/);
   assert.match(logs, /"type":"grant.refused"/);
-  const g2 = await approved(env, { ...LOGIN, credential: { domain: 'shop.example', username: 'a@example.test' }, operator_present: true });
-  const r2 = await B(env, 'browser.fill_login', { grant_id: g2.grant_id, session_id: 'any' });
+  env.store.prompt.refuse.delete('127.0.0.1');
+  env.store.prompt.noAnswer.add('127.0.0.1');
+  const g2 = await approved(env, { ...LOGIN, credential: { domain: '127.0.0.1', username: 'diner@example.test' }, operator_present: true });
+  const o2 = await B(env, 'browser.open', { grant_id: g2.grant_id, url: env.site.origin + '/login' });
+  const r2 = await B(env, 'browser.fill_login', { grant_id: g2.grant_id, session_id: o2.result.session_id });
   assert.equal(r2.error, 'store_no_answer');
 }, { approval: 'device_local', listable: false }));
 
@@ -99,8 +103,10 @@ test('one-time code from the person: the channel hands it to the broker, the cor
 }));
 
 test('one-time code from the person times out', () => withEnv(async (env) => {
-  const g = await approved(env, { ...LOGIN, credential: { domain: 'table.example' } });
-  const r = await B(env, 'browser.fill_code', { grant_id: g.grant_id, session_id: 's', source: 'person', timeout_seconds: 1 });
+  env.store.setOrigin('item-table', env.site.origin);
+  const g = await approved(env, { ...LOGIN, credential: { domain: '127.0.0.1' } });
+  const { result: { session_id } } = await B(env, 'browser.open', { grant_id: g.grant_id, url: env.site.origin + '/login' });
+  const r = await B(env, 'browser.fill_code', { grant_id: g.grant_id, session_id, source: 'person', timeout_seconds: 1 });
   assert.equal(r.error, 'code_timeout');
 }));
 
@@ -243,14 +249,17 @@ test('0.4: grant.request and grant.status return the exact request of a binding 
   assert.deepEqual((await B(env, 'grant.status', { grant_id: r.grant_id })).result.request, r.request);
 }));
 
-test('0.4: the approval (the fixture\'s summary) shows the call and every constraint', () => withEnv(async (env) => {
+// With OPA_BROKER_MODULE, the real broker's own approval page shows these (parts/broker tests); its summary is shorter.
+const FIXTURE_ONLY = { skip: process.env.OPA_BROKER_MODULE ? 'the real broker shows these on its approval page, tested in parts/broker' : false };
+
+test('0.4: the approval (the fixture\'s summary) shows the call and every constraint', FIXTURE_ONLY, () => withEnv(async (env) => {
   const BOOK = { venue: 'Casa Verde', date: '2026-12-04', time: '19:00', party_size: 2, notes: 'window seat' };
   const r = (await B(env, 'grant.request', { credential: 'fake-mcp', ops: ['book'], constraints: BOOK, mode: 'one_shot', ttl_seconds: 600, purpose: 'Book' })).result;
   assert.match(r.summary, /Calls fake-reservations\/book_table/);
   assert.match(r.summary, /notes: window seat/);
 }));
 
-test('0.4: the passkey covers everything the approval shows', () => withEnv(async (env) => {
+test('0.4: the passkey covers everything the approval shows', FIXTURE_ONLY, () => withEnv(async (env) => {
   // Change any of it after the request, and it can't be approved.
   env.broker.autoApprove = false;
   for (const [k, v] of [['purpose', 'something else'], ['ttl_seconds', 3600], ['operator_present', true], ['summary', 'Book somewhere else.']]) {

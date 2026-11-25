@@ -13,7 +13,8 @@ import { Log } from '../lib/log.js';
 import { validate, validateEnvelope } from '../lib/schema.js';
 import { FixtureCredentialStore } from '../store/fixture-store.js';
 import { startSite } from '../site/server.js';
-import { BrokerFixture } from '../broker/broker.js';
+import { BrokerFixture, FAKE_MCP } from '../broker/broker.js';
+import { BrowserWorker } from '../browser-worker/worker.js';
 import { ContextFixture } from '../context/context.js';
 import { TerminalChannel } from '../channel/terminal.js';
 import { startRouter, infer } from '../router/router.js';
@@ -47,11 +48,42 @@ export async function checkedCall(socket, op, caller, errandId, args) {
   return res;
 }
 
+const FIND_TABLE = {
+  type: 'object',
+  properties: {
+    venue: { type: 'string' }, date: { type: 'string', description: 'YYYY-MM-DD' },
+    time: { type: 'string', description: 'HH:MM, 24-hour' }, party_size: { type: 'integer' },
+  },
+  required: ['venue', 'date', 'time', 'party_size'],
+};
+
 export const SCRIPT = [
   { when: 'Book a table', tool_calls: [{ name: 'find_table', arguments: { venue: 'Casa Verde', date: '2026-12-04', time: '19:00', party_size: 2 } }] },
   { when: 'Reservation confirmed', text: 'Booked.' },
   { when: '*', text: 'Sorry, I did not follow that.' },
 ];
+
+/**
+ * Swap-in: OPA_BROKER_MODULE=<path to parts/broker/src/broker.js> runs the real broker in place of the
+ * fixture, with the fixture store, browser worker and MCP server plugged in, and approvals standing in
+ * for the passkey. It exposes the handles the tests use (autoApprove, approve, worker, keys, listen).
+ */
+async function realBroker(modulePath, { dir, store, onGrantEvent }) {
+  const { Broker } = await import(modulePath);
+  const { listen } = await import(new URL('sockets.js', 'file://' + path.resolve(modulePath)).href);
+  const h = { autoApprove: true };
+  const worker = new BrowserWorker({ store, mode: 'agent_browser', getBookGrant: (id) => b.usableBookGrant(id) });
+  const b = new Broker({
+    stateDir: dir, store, worker, mcp: FAKE_MCP, operator: 'fixture-operator.example', onGrantEvent,
+    approvals: { url: (g) => {
+      if (h.autoApprove) setTimeout(() => b.decide(g.grant_id, true, { passkey_credential_id: 'fixture-passkey' }), 20);
+      return `http://127.0.0.1/approve/${g.grant_id}`;
+    } },
+  });
+  return Object.assign(h, { worker, real: b, brokerKey: b.brokerKey, agentKey: b.agentKey,
+    approve: (id, ok = true) => b.decide(id, ok, { passkey_credential_id: 'fixture-passkey' }),
+    listen: async (p, { caller = 'core' } = {}) => (await listen(b, [{ caller, path: p }]))[0] });
+}
 
 /** Start every fixture in `dir`. Returns handles and a stop() function. */
 export async function startAll(dir, { storeOpts } = {}) {
@@ -69,10 +101,10 @@ export async function startAll(dir, { storeOpts } = {}) {
     'grant.event': async ({ grant_id, state }) => { waiters.get(grant_id)?.(state); return {}; },
   });
 
-  const broker = new BrokerFixture({
-    store, logPath: path.join(dir, 'actions.jsonl'),
-    onGrantEvent: (grant_id, state) => checkedCall(sock('core'), 'grant.event', 'broker', null, { grant_id, state }),
-  });
+  const onGrantEvent = (grant_id, state) => checkedCall(sock('core'), 'grant.event', 'broker', null, { grant_id, state });
+  const broker = process.env.OPA_BROKER_MODULE
+    ? await realBroker(process.env.OPA_BROKER_MODULE, { dir, store, onGrantEvent })
+    : new BrokerFixture({ store, logPath: path.join(dir, 'actions.jsonl'), onGrantEvent });
   const brokerServer = await broker.listen(sock('broker-core'));
   const brokerChannelServer = await broker.listen(sock('broker-channel-terminal'), { caller: 'channel-terminal' });
   const context = new ContextFixture({ logPath: path.join(dir, 'context-reads.jsonl') });
@@ -80,7 +112,10 @@ export async function startAll(dir, { storeOpts } = {}) {
   const channel = new TerminalChannel({ coreSocket: sock('core'), print: false });
   channel.watchSlots(sock('broker-channel-terminal'));   // the adapter long-polls code.slots, as a real one does
   const channelServer = await channel.listen(sock('channel'));
-  const router = await startRouter({ script: SCRIPT });
+  // Swap-in: OPA_ROUTER_URL points the errand at a real router (parts/router) instead of the scripted one.
+  const router = process.env.OPA_ROUTER_URL
+    ? { url: process.env.OPA_ROUTER_URL, close: async () => {} }
+    : await startRouter({ script: SCRIPT });
 
   fs.writeFileSync(path.join(dir, 'keys.json'), JSON.stringify({
     broker: broker.brokerKey.publicKey.export({ type: 'spki', format: 'pem' }),
@@ -124,7 +159,9 @@ export async function standInCore(env, { log = () => {} } = {}) {
   log(`person> ${msg.text}`);
 
   // 2. The model turns it into a plan (scripted).
-  const inferArgs = { model: 'default', system: 'You book tables.', messages: [{ role: 'user', content: msg.text }], tools: [{ name: 'find_table', description: 'Find and book a table', parameters: { type: 'object' } }] };
+  const tools = [{ name: 'find_table', description: 'Find and book a table', parameters: FIND_TABLE }];
+  const system = 'You book restaurant tables for the person. When they ask for a table, call find_table with the details. After the booking, reply with one short sentence.';
+  const inferArgs = { model: 'default', system, messages: [{ role: 'user', content: msg.text }], tools };
   const inf = await infer(router.url, (() => { const r = request('infer', 'core', errandId, inferArgs); check('request', 'infer', r); check('infer.args', 'infer', inferArgs); return r; })());
   check('infer.result', 'infer', inf.result);
   const want = inf.result.tool_calls[0].arguments;
@@ -166,10 +203,15 @@ export async function standInCore(env, { log = () => {} } = {}) {
   const confirmation = /Confirmation ([A-Z]+-[A-F0-9]+)/.exec(done.page.text)?.[1];
 
   // 8. Tell the person.
-  const replyArgs = { model: 'default', messages: [{ role: 'user', content: msg.text }, { role: 'tool', content: [{ type: 'tool_result', call_id: inf.result.tool_calls[0].call_id, content: done.page.text }] }] };
+  const call = inf.result.tool_calls[0];
+  const replyArgs = { model: 'default', system, tools, messages: [
+    { role: 'user', content: msg.text },
+    { role: 'assistant', content: [...inf.result.content, { type: 'tool_call', call_id: call.call_id, name: call.name, arguments: call.arguments }] },
+    { role: 'tool', content: [{ type: 'tool_result', call_id: call.call_id, content: done.page.text }] },
+  ] };
   const reply = await infer(router.url, request('infer', 'core', errandId, replyArgs));
   check('infer.result', 'infer', reply.result);
-  await say(`${reply.result.content[0].text} ${want.venue}, ${want.date} at ${want.time} for ${want.party_size}. Confirmation ${confirmation}.`);
+  await say(`${reply.result.content.map((p) => p.text).join(" ").trim() || "Booked."} ${want.venue}, ${want.date} at ${want.time} for ${want.party_size}. Confirmation ${confirmation}.`);
   await B('browser.close', { grant_id: g, session_id });
 
   return { errandId, confirmation, standingGrant: g, bookGrant: book.grant_id };
