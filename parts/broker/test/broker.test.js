@@ -491,3 +491,21 @@ test('browser binding click: the book or pay grant must be for the session\'s si
   assert.equal(await act(pay), 'ok');
   assert.equal(acts, 1);
 });
+
+test('web services: a signed request never follows a redirect, and a redirect is not a success', async (t) => {
+  const http = await import('node:http');
+  const { webServices } = await import('../src/groundmark-http.js');
+  const { generateKeyPairSync } = await import('node:crypto');
+  const key = generateKeyPairSync('ed25519').privateKey;
+  const reached = [];
+  const serve = (fn) => new Promise((ok) => { const s = http.createServer(fn).listen(0, '127.0.0.1', () => ok(s)); t.after(() => s.close()); });
+  const other = await serve((req, res) => { reached.push(req.headers); res.end('{}'); });
+  const rp = await serve((req, res) => { req.resume(); res.writeHead(req.url.startsWith('/after') ? 303 : 307, { location: `http://127.0.0.1:${other.address().port}/x` }); res.end(); });
+  const tools = webServices({ rp: { credential: 'c', base_url: `http://127.0.0.1:${rp.address().port}`, tools: {
+    book: { op: 'book', method: 'POST', path: '/b' }, booked: { op: 'book', method: 'POST', path: '/after' }, look: { op: 'search', path: '/l' } } } }, { key, keyid: 'agent.example#k1' });
+  const outcome = (p) => p.then(() => 'ok', (e) => `${e.status} definite=${e.definite}`);
+  assert.equal(await outcome(tools.rp.tools.book.run({ a: 1 })), '307 definite=false');    // might have been done before the redirect
+  assert.equal(await outcome(tools.rp.tools.booked.run({ a: 1 })), '303 definite=false');  // post/redirect/get: very likely done
+  assert.equal(await outcome(tools.rp.tools.look.run({ q: 1 })), '307 definite=false');
+  assert.equal(reached.length, 0);   // the signature never went to the other host
+});

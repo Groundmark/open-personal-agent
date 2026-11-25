@@ -38,8 +38,9 @@ const nonceFrom = (accept) => /;\s*nonce="([^"]+)"/.exec(accept || '')?.[1];
  */
 export function agentFetch({ key, keyid, fetchImpl = fetch }) {
   return async (url, { method = 'GET', body } = {}) => {
+    // Never follow a redirect: the signature would go to whatever host the Location names, which could replay it.
     const go = async (nonce) => fetchImpl(url, {
-      method, body, signal: AbortSignal.timeout(20_000),
+      method, body, signal: AbortSignal.timeout(20_000), redirect: 'manual',
       headers: { ...(body ? { 'content-type': 'application/json' } : {}), accept: 'application/json', ...signHeaders({ method, url, body, key, keyid, nonce }) },
     });
     let res = await go();
@@ -81,8 +82,9 @@ export function webServices(config = {}, { key, keyid, fetchImpl } = {}) {
         const r = build(args);
         const res = await call(r.url, { method: r.method, body: r.body });
         // 4xx (other than 408/429) is the relying party saying it didn't do it; 5xx and the rest leave it unknown.
-        if (res.status >= 400) {
-          const definite = res.status < 500 && res.status !== 408 && res.status !== 429;
+        // So does a redirect (3xx): it isn't followed, and a POST may have been done before it (a 303, say).
+        if (res.status >= 300) {
+          const definite = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
           throw Object.assign(new Error(res.json?.message || res.json?.error || `HTTP ${res.status}`), { upstream: res.json, status: res.status, definite });
         }
         return { ...res.json, groundmark: { presented: true, verified: true } };
