@@ -1,0 +1,15 @@
+[server]
+port = 8411
+log = "/var/lib/opa/router/calls.jsonl"
+
+[models.default]
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-haiku-5.5"
+credential = "inference-openrouter"
+
+[models.cheap]
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-haiku-5.5"
+credential = "inference-openrouter"

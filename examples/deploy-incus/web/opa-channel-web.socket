@@ -1,0 +1,11 @@
+[Unit]
+Description=Open personal agent: the web channel's socket (only the core can connect)
+
+[Socket]
+ListenStream=/run/opa/channel-web.sock
+SocketUser=opa-core
+SocketMode=0600
+Service=opa-channel-web.service
+
+[Install]
+WantedBy=sockets.target

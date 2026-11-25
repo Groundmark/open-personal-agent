@@ -1,0 +1,10 @@
+{
+  "state_dir": "/var/lib/opa/web",
+  "origins": ["https://chat.groundmark.fyi"],
+  "rp_id": "groundmark.fyi",
+  "pinned_file": "/etc/opa/web-pinned.json",
+  "core_socket": "/run/opa/core.sock",
+  "port": 8081,
+  "approval_upstream": "http://127.0.0.1:8443",
+  "password_signin": false
+}

@@ -1,0 +1,18 @@
+{
+  "state_dir": "/var/lib/opa/core",
+  "router_url": "http://127.0.0.1:8411/infer",
+  "broker_socket": "/run/opa/broker-core.sock",
+  "channels": {
+    "web": "/run/opa/channel-web.sock"
+  },
+  "services": {
+    "casa-verde": {
+      "name": "Casa Verde",
+      "credential": "table.groundmark.fyi",
+      "server": "table",
+      "book_tool": "book_table",
+      "search_tool": "find_tables"
+    }
+  },
+  "timezone": "UTC"
+}

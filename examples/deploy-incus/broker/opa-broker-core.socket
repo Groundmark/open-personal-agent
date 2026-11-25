@@ -1,0 +1,13 @@
+[Unit]
+Description=Open personal agent: the core's socket to the broker (only opa-core can connect)
+
+[Socket]
+ListenStream=/run/opa/broker-core.sock
+SocketUser=opa-core
+SocketGroup=opa-core
+SocketMode=0600
+FileDescriptorName=core
+Service=opa-broker.service
+
+[Install]
+WantedBy=sockets.target

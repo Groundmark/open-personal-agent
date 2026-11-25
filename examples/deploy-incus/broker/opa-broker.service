@@ -1,0 +1,24 @@
+[Unit]
+Description=Open personal agent: credential broker (grants, passkey approvals on 127.0.0.1:8443)
+After=network-online.target opa-vault.service
+Requires=opa-broker-core.socket
+
+[Service]
+User=opa-broker
+SupplementaryGroups=opa-core-callers
+Sockets=opa-broker-core.socket
+ExecStart=/usr/local/bin/node /opt/opa/broker/src/main.js serve /etc/opa/broker.json
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opa/broker
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

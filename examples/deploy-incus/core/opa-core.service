@@ -1,0 +1,21 @@
+[Unit]
+Description=Open personal agent: the core
+After=network-online.target opa-router.service opa-broker.service
+Requires=opa-core.socket
+
+[Service]
+User=opa-core
+Sockets=opa-core.socket
+ExecStart=/usr/local/bin/node /opt/opa/core/src/main.js /etc/opa/core.json
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opa/core
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
