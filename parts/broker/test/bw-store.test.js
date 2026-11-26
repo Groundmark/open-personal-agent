@@ -47,6 +47,19 @@ test('get and totp: the secret is wrapped; items outside the collection are as i
   assert.equal(await store(d).totp('aaaaaaaa-0000-4000-8000-000000000002'), null);
 });
 
+test('a saved URI keeps its scheme and port; an app URI is never a web origin', async () => {
+  const d = dirs();
+  const origin = async (ref) => (await store(d).get(ref)).record.origin;
+  assert.equal(await origin('aaaaaaaa-0000-4000-8000-000000000004'), 'https://nas.home:5001');   // not https://com.nas.app
+  assert.equal(await origin('aaaaaaaa-0000-4000-8000-000000000005'), 'http://192.168.1.1');
+  assert.equal(await origin('aaaaaaaa-0000-4000-8000-000000000006'), null);                  // only an app URI: no origin
+  assert.equal(await origin('aaaaaaaa-0000-4000-8000-000000000002'), 'https://shop.example'); // a bare host is https, as before
+  // iosapp://com.table.example has the host name com.table.example, but it's no login for table.example.
+  assert.deepEqual((await store(d).find({ domain: 'table.example' })).map((x) => x.record.username), ['diner@example.test']);
+  assert.equal((await store(d).find({ domain: 'nas.app' })).length, 0);
+  assert.deepEqual((await store(d).find({ domain: 'nas.home' })).map((x) => x.record.name), ['NAS']);
+});
+
 test('refuses to run with readable state, and a locked vault is store_unavailable without detail', async () => {
   const d = dirs();
   fs.chmodSync(d.app, 0o755);

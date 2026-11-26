@@ -466,3 +466,141 @@ test('the approval page and the chat card show every constraint a binding call w
   assert.equal(rows.Changes, '[{"item":"coffee","quantity":1,"price":1000}]');
   assert.equal(Object.fromEntries(constraintRows({ changes: [{ item: 'coffee', quantity: 2 }, { skip: '2026-12-04' }] })).Changes, 'coffee: 2; skip 2026-12-04');
 });
+
+test('browser binding click: the book or pay grant must be for the session\'s site and carry what the page is checked against', async () => {
+  let acts = 0;
+  const worker = { mode: 'agent_browser', open: async () => ({ session_id: 'o1', page: {} }), act: async () => { acts += 1; return { page: { title: 'x', text: '' }, binding: null }; } };
+  const sites = { 'fake-table': 'https://table.example', 'other-site': 'https://other.example' };
+  const store2 = { approval: 'none', label: 't', async get(ref) { return sites[ref] ? { record: { ref, origin: sites[ref] }, secret: {} } : null; } };
+  const { b, h } = mk(tmp(), { worker, store: store2 });
+  const ask = async (a) => { const g = await h['grant.request']({ mode: 'one_shot', ttl_seconds: 600, purpose: 'p', ...a }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const look = await ask({ credential: 'other-site', ops: ['search'], mode: 'standing' });
+  const { session_id } = await h['browser.open']({ grant_id: look, url: 'https://other.example/' }, env('x', {}));
+  const act = (book_grant_id) => h['browser.act']({ grant_id: look, session_id, action: 'click', target: 'Complete reservation', book_grant_id }, env('x', {})).then(() => 'ok', (e) => e.code);
+  // Approved for table.example, clicked on other.example: refused before the worker runs, and the grant is untouched.
+  const elsewhere = await ask({ credential: 'fake-table', ops: ['book'], constraints: BOOK });
+  assert.equal(await act(elsewhere), 'origin_mismatch');
+  assert.equal(acts, 0);
+  assert.equal(b.grants.get(elsewhere).state, 'approved');
+  assert.equal(b.grants.get(elsewhere).in_flight, undefined);
+  // A pay grant has to carry the booking the page is checked against (browser-worker.md), like book.
+  const bare = await ask({ credential: 'other-site', ops: ['pay'] });
+  assert.equal(await act(bare), 'constraint_mismatch');
+  assert.equal(acts, 0);
+  const pay = await ask({ credential: 'other-site', ops: ['pay'], constraints: BOOK });
+  assert.equal(await act(pay), 'ok');
+  assert.equal(acts, 1);
+});
+
+test('web services: a signed request never follows a redirect, and a redirect is not a success', async (t) => {
+  const http = await import('node:http');
+  const { webServices } = await import('../src/groundmark-http.js');
+  const { generateKeyPairSync } = await import('node:crypto');
+  const key = generateKeyPairSync('ed25519').privateKey;
+  const reached = [];
+  const serve = (fn) => new Promise((ok) => { const s = http.createServer(fn).listen(0, '127.0.0.1', () => ok(s)); t.after(() => s.close()); });
+  const other = await serve((req, res) => { reached.push(req.headers); res.end('{}'); });
+  const rp = await serve((req, res) => { req.resume(); res.writeHead(req.url.startsWith('/after') ? 303 : 307, { location: `http://127.0.0.1:${other.address().port}/x` }); res.end(); });
+  const tools = webServices({ rp: { credential: 'c', base_url: `http://127.0.0.1:${rp.address().port}`, tools: {
+    book: { op: 'book', method: 'POST', path: '/b' }, booked: { op: 'book', method: 'POST', path: '/after' }, look: { op: 'search', path: '/l' } } } }, { key, keyid: 'agent.example#k1' });
+  const outcome = (p) => p.then(() => 'ok', (e) => `${e.status} definite=${e.definite}`);
+  assert.equal(await outcome(tools.rp.tools.book.run({ a: 1 })), '307 definite=false');    // might have been done before the redirect
+  assert.equal(await outcome(tools.rp.tools.booked.run({ a: 1 })), '303 definite=false');  // post/redirect/get: very likely done
+  assert.equal(await outcome(tools.rp.tools.look.run({ q: 1 })), '307 definite=false');
+  assert.equal(reached.length, 0);   // the signature never went to the other host
+});
+
+// A store or worker call that waits until the test lets it go.
+const gate = () => { let open; const p = new Promise((r) => { open = r; }); const g = { waiting: false, wait: () => { g.waiting = true; return p; }, open }; return g; };
+const until = async (f) => { while (!f()) await new Promise((x) => setTimeout(x, 5)); };
+
+test('a revocation while a call waits on the store or the worker is seen before the broker acts', async () => {
+  const done = [];
+  let g1 = null, g2 = null;
+  const worker = { mode: 'agent_browser',
+    open: async () => { if (g2) await g2.wait(); done.push('open'); return { session_id: `w${done.length}`, page: {} }; },
+    close: async ({ session_id }) => { done.push(`close ${session_id}`); return {}; },
+    extract: async () => { done.push('extract'); return { page: {} }; },
+    fill_login: async () => { done.push('fill_login'); return { filled: 2 }; } };
+  const login = { ref: 'aaaaaaaa-0000-4000-8000-000000000001', record: { ref: 'aaaaaaaa-0000-4000-8000-000000000001', username: 'diner@example.test', origin: 'https://table.example' }, secret: {} };
+  const slowStore = { ...store, async find() { return [login]; }, async get(ref) { if (g1) await g1.wait(); return ref === login.ref ? login : store.get(ref); } };
+  const mcp = { svc: { credential: 'fake-table', tools: { look: { op: 'search', run: async () => { done.push('mcp'); return {}; } } } } };
+  const { b, h } = mk(tmp(), { worker, store: slowStore, mcp });
+  const ask = async (a) => { const g = await h['grant.request']({ mode: 'standing', ttl_seconds: 600, purpose: 'p', ...a }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const code = (p) => p.then(() => 'ok', (e) => e.code);
+  const revokeWhile = async (gt, grant_id, call) => {
+    const p = code(call());
+    await until(() => gt.waiting);
+    await h['grant.revoke']({ grant_id, reason: 'test' }, env('grant.revoke', {}));
+    gt.open();
+    return p;
+  };
+  // fill_login under a credential-by-site grant: revoked while the vault is asked.
+  const site = await ask({ credential: { domain: 'table.example' }, ops: ['login'] });
+  b.sessions.set('s1', { grant_id: site, url: 'https://table.example/' });
+  assert.equal(await revokeWhile(g1 = gate(), site, () => h['browser.fill_login']({ grant_id: site, session_id: 's1' }, env('x', {}))), 'grant_revoked');
+  // mcp.call: revoked while the store is read.
+  g1 = null;
+  const rp = await ask({ credential: 'fake-table', ops: ['search'] });
+  assert.equal(await revokeWhile(g1 = gate(), rp, () => h['mcp.call']({ grant_id: rp, server: 'svc', tool: 'look', arguments: {} }, env('x', {}))), 'grant_revoked');
+  // extract: revoked while the session's site is looked up.
+  g1 = null;
+  const look = await ask({ credential: 'fake-table', ops: ['search'] });
+  b.sessions.set('s2', { grant_id: look, url: 'https://table.example/' });
+  assert.equal(await revokeWhile(g1 = gate(), look, () => h['browser.extract']({ grant_id: look, session_id: 's2', target: 'x' }, env('x', {}))), 'grant_revoked');
+  g1 = null;
+  assert.deepEqual(done, ['close s1', 'close s2']);   // nothing filled, called or read (the revoked grants' sessions closed)
+  done.length = 0;
+  // open: revoked while the worker opens the page. The session it opened is closed, not left behind.
+  const look2 = await ask({ credential: 'fake-table', ops: ['search'] });
+  assert.equal(await revokeWhile(g2 = gate(), look2, () => h['browser.open']({ grant_id: look2, url: 'https://table.example/' }, env('x', {}))), 'grant_revoked');
+  assert.deepEqual(done, ['open', 'close w1']);
+  assert.equal([...b.sessions.values()].filter((s) => s.grant_id === look2).length, 0);
+});
+
+test('a one-shot grant is used once by concurrent browser calls too', async () => {
+  let opens = 0, fills = 0;
+  const worker = { mode: 'agent_browser', close: async () => ({}),
+    open: async () => { opens += 1; await new Promise((r) => setTimeout(r, 20)); return { session_id: `o${opens}`, page: {} }; },
+    fill_login: async () => { fills += 1; await new Promise((r) => setTimeout(r, 20)); return { filled: 2 }; } };
+  const { b, h } = mk(tmp(), { worker });
+  const ask = async (ops) => { const g = await h['grant.request']({ credential: 'fake-table', ops, mode: 'one_shot', ttl_seconds: 600, purpose: 'p' }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const code = (p) => p.then(() => 'ok', (e) => e.code);
+  const read = await ask(['read']);
+  const open = () => code(h['browser.open']({ grant_id: read, url: 'https://table.example/' }, env('x', {})));
+  assert.deepEqual(await Promise.all([open(), open()]), ['ok', 'grant_consumed']);
+  assert.equal(opens, 1);
+  assert.equal(b.grants.get(read).uses, 1);
+  const login = await ask(['login']);
+  b.sessions.set('s1', { grant_id: login, url: 'https://table.example/' });
+  const fill = () => code(h['browser.fill_login']({ grant_id: login, session_id: 's1' }, env('x', {})));
+  assert.deepEqual(await Promise.all([fill(), fill()]), ['ok', 'grant_consumed']);
+  assert.equal(fills, 1);
+  // A call refused before it acts gives the one-shot grant back.
+  const read2 = await ask(['read']);
+  assert.equal(await code(h['browser.open']({ grant_id: read2, url: 'https://elsewhere.example/' }, env('x', {}))), 'origin_mismatch');
+  assert.equal(b.grants.get(read2).in_flight, undefined);
+  assert.equal(await code(h['browser.open']({ grant_id: read2, url: 'https://table.example/' }, env('x', {}))), 'ok');
+});
+
+test('a spent one-shot grant\'s sessions close with it, and the sweep closes any left over', async () => {
+  const closed = [];
+  const worker = { mode: 'agent_browser', open: async () => ({ session_id: 'o1', page: { title: 'Bookings' } }), close: async ({ session_id }) => { closed.push(session_id); return {}; } };
+  const { b, h } = mk(tmp(), { worker });
+  const ask = async (ops, mode = 'one_shot') => { const g = await h['grant.request']({ credential: 'fake-table', ops, mode, ttl_seconds: 600, purpose: 'p' }, env('x', {})); b.decide(g.grant_id, true); return g.grant_id; };
+  const once = await ask(['read']);
+  const r = await h['browser.open']({ grant_id: once, url: 'https://table.example/' }, env('x', {}));
+  assert.equal(r.page.title, 'Bookings');                  // the open was the grant's one use, and the core has its page
+  assert.equal(b.grants.get(once).state, 'consumed');
+  assert.deepEqual(closed, ['o1']);
+  assert.equal(b.sessions.size, 0);                       // no other grant can drive it now
+  const standing = await ask(['search'], 'standing');
+  await assert.rejects(h['browser.extract']({ grant_id: standing, session_id: 'o1', target: 'x' }, env('x', {})), { code: 'origin_mismatch' });
+  // Spent some other way (an unknown outcome at a tool, say) with a session still open under it: the sweep closes it.
+  const other = await ask(['read']);
+  b.sessions.set('left', { grant_id: other, url: 'https://table.example/' });
+  b.grants.use(b.grants.get(other));
+  await b.sweep();
+  assert.deepEqual(closed, ['o1', 'left']);
+  assert.equal(b.sessions.size, 0);
+});

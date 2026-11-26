@@ -16,6 +16,15 @@
   const go = document.getElementById('go');
   const no = document.getElementById('no');
   const status = document.getElementById('status');
+  const revoke = document.getElementById('revoke');
+  if (root && revoke && status) {
+    revoke.addEventListener('click', async () => {
+      revoke.disabled = true;
+      try { await call(`/approve/${root.dataset.grant}/revoke`, {}); status.textContent = 'Revoked. Your agent can no longer use this.'; }
+      catch (err) { status.textContent = `Not done: ${err.message}`; revoke.disabled = false; }
+    });
+    return;
+  }
   if (!root || !go || !status) return;
   const done = (text) => { status.textContent = text; go.disabled = true; if (no) no.disabled = true; };
 

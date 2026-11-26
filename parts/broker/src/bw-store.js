@@ -13,7 +13,12 @@ import { join } from 'node:path';
 import { CredentialStore, Secret, StoreError } from './credential-store.js';
 
 const hostMatches = (host, domain) => host === domain || host.endsWith('.' + domain);
-const hostOf = (u) => { try { return new URL(/^[a-z]+:\/\//i.test(u) ? u : `https://${u}`).hostname.toLowerCase(); } catch { return null; } };
+// A saved URI as a web URL (a bare host is https), or null. An app URI (androidapp://, iosapp://) is never a web
+// origin: its "host" is a package name, which can look like an unrelated site's subdomain.
+const webUrl = (u) => {
+  try { const x = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? u : `https://${u}`); return x.protocol === 'https:' || x.protocol === 'http:' ? x : null; } catch { return null; }
+};
+const hostOf = (u) => webUrl(u)?.hostname.toLowerCase() ?? null;
 
 function checkState(dir) {
   const st = statSync(dir);
@@ -77,8 +82,9 @@ export class BitwardenStore extends CredentialStore {
 
   #record(it) {
     const uris = (it.login?.uris ?? []).map((u) => u.uri).filter(Boolean);
-    const first = uris.map(hostOf).find(Boolean);
-    return { ref: it.id, kind: 'login', name: it.name, username: it.login?.username ?? null, uris, origin: first ? `https://${first}` : null, has_totp: Boolean(it.login?.totp) };
+    // The first web URI's origin, scheme and port kept (http://192.168.1.1, https://nas.home:5001).
+    const first = uris.map(webUrl).find(Boolean);
+    return { ref: it.id, kind: 'login', name: it.name, username: it.login?.username ?? null, uris, origin: first?.origin ?? null, has_totp: Boolean(it.login?.totp) };
   }
 
   #mine(it) { return it?.type === 1 && (it.collectionIds ?? []).includes(this.#collection); }

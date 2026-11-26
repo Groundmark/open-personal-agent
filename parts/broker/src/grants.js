@@ -110,12 +110,12 @@ export class GrantStore {
     return out;
   }
 
-  /** The grant, if live and allowing any of `ops`; else the contract's error. */
-  usable(id, ops = []) {
+  /** The grant, if live and allowing any of `ops`; else the contract's error. `token`: the caller's own reserve(). */
+  usable(id, ops = [], token = null) {
     const g = this.get(id);
     if (g.state === 'approved' && Date.parse(g.expires_at) <= this.#now()) throw new BrokerError('grant_expired', `${id} expired`);
     if (STATE_ERR[g.state]) throw new BrokerError(STATE_ERR[g.state], `${id} is ${g.state}`);
-    if (g.in_flight) throw new BrokerError('grant_consumed', `${id} is being used right now`);
+    if (g.in_flight && g.in_flight !== token) throw new BrokerError('grant_consumed', `${id} is being used right now`);
     const want = [].concat(ops);
     if (want.length && !want.some((o) => g.ops.includes(o))) throw new BrokerError('op_not_granted', `${want.join('|')} not in [${g.ops}]`);
     return g;

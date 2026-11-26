@@ -53,6 +53,21 @@ export class Broker {
     return g;
   }
 
+  /**
+   * Ends a grant, for the core (grant.revoke) or the person (the approval page, by: 'person'). Its sessions and code
+   * slots end with it. The core is told when it wasn't the one asking.
+   */
+  async revoke(grantId, reason = '', by = 'core') {
+    const before = this.grants.get(grantId).state;
+    const g = this.grants.revoke(grantId);
+    if (g.state === 'revoked' && before !== 'revoked') {
+      this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id: grantId, detail: { reason, ...(by !== 'core' ? { by } : {}) } });
+      await this.#endSessions(g);
+      if (by !== 'core') this.onGrantEvent(g.grant_id, 'revoked', g.errand_id);
+    }
+    return g;
+  }
+
   /** Expires what has run out. Call it on a timer; the grant store also refuses expired grants on use. */
   async sweep() {
     for (const g of this.grants.sweep(this.pendingSeconds * 1000)) {
@@ -60,11 +75,15 @@ export class Broker {
       await this.#endSessions(g);
       this.onGrantEvent(g.grant_id, 'expired', g.errand_id);
     }
+    // ...and any session still open under a grant that's no longer live (a one-shot grant spent outside #use, say).
+    const ended = new Set([...this.sessions.values()].map((s) => s.grant_id).filter((id) => this.grants.get(id).state !== 'approved'));
+    for (const id of ended) await this.#endSessions(this.grants.get(id));
   }
 
   async #endSessions(g) {
     // A code slot waiting under this grant ends with it (and so can't be filled after a revocation).
-    this.#cancelSlots((s) => s.grant_id === g.grant_id, new BrokerError(g.state === 'revoked' ? 'grant_revoked' : 'grant_expired', `${g.grant_id} is ${g.state}`));
+    const code = { revoked: 'grant_revoked', consumed: 'grant_consumed' }[g.state] ?? 'grant_expired';
+    this.#cancelSlots((s) => s.grant_id === g.grant_id, new BrokerError(code, `${g.grant_id} is ${g.state}`));
     const ids = [...this.sessions].filter(([, s]) => s.grant_id === g.grant_id).map(([sid]) => sid);
     // ...and so does one waiting on a session this grant opened (the slot may be under another grant).
     this.#cancelSlots((s) => ids.includes(s.session_id), new BrokerError('bad_request', 'the session closed'));
@@ -92,9 +111,28 @@ export class Broker {
     return e;
   }
 
-  #use(g, detail) {
+  async #use(g, detail) {
     this.grants.use(g);
     this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail });
+    // A one-shot grant is spent by its use, and a session lives no longer than its grant.
+    if (g.mode === 'one_shot') await this.#endSessions(g);
+  }
+
+  /**
+   * Takes a grant for one call: checks it and, if it's one-shot, reserves it, in one tick before anything is awaited,
+   * so a concurrent call can't use it too. Every handler that spends a grant starts here and ends with #use or release.
+   */
+  #take(req, id, ops) {
+    try { const g = this.grants.usable(id, ops); return { g, token: this.grants.reserve(g) }; }
+    catch (e) { throw this.#refuse(req.errand_id, id, e); }
+  }
+
+  /** After any wait, just before acting (nothing awaited in between): the grant is still live, the session still open. */
+  #still(req, h, ops, session_id) {
+    try {
+      this.grants.usable(h.g.grant_id, ops, h.token);
+      if (session_id !== undefined && !this.sessions.has(session_id)) throw new BrokerError('origin_mismatch', 'the session closed');
+    } catch (e) { throw this.#refuse(req.errand_id, h.g.grant_id, e); }
   }
 
   #storeError(e) { return e?.kind && STORE_ERR[e.kind] ? new BrokerError(STORE_ERR[e.kind], e.message) : e; }
@@ -228,12 +266,7 @@ export class Broker {
       },
 
       'grant.revoke': async ({ grant_id, reason = '' }) => {
-        const before = this.grants.get(grant_id).state;
-        const g = this.grants.revoke(grant_id);
-        if (g.state === 'revoked' && before !== 'revoked') {
-          this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id, detail: { reason } });
-          await this.#endSessions(g);
-        }
+        const g = await this.revoke(grant_id, reason);
         return { grant_id, state: g.state };
       },
 
@@ -266,133 +299,163 @@ export class Broker {
           token = this.grants.reserve(g);   // same tick as usable(): a concurrent call now gets grant_consumed
           return g;
         });
+        // Nothing has been sent yet: a store failure or a revocation while the store was read gives the grant back.
+        let secret;
+        try {
+          secret = (await this.store.get(srv.credential))?.secret ?? null;
+          this.#still(req, { g, token }, t.op);
+        } catch (e) { this.grants.release(g, token); throw e; }
         let content;
-        try { content = await t.run(args, (await this.store.get(srv.credential))?.secret ?? null); } catch (e) {
+        try { content = await t.run(args, secret); } catch (e) {
           // Refused here, before anything was sent (an argument that would replace a fixed query parameter).
           if (e.local) { this.grants.release(g, token); throw this.#refuse(req.errand_id, grant_id, new BrokerError('bad_request', e.message)); }
           // Only a definite refusal (the tool says nothing happened, e.g. HTTP 4xx) gives the grant back; anything
           // else (5xx, timeout, connection lost) might have gone through, so a one-shot grant counts as used.
-          if (e.definite) this.grants.release(g, token); else if (g.mode === 'one_shot') this.grants.use(g);
+          if (e.definite) this.grants.release(g, token); else if (g.mode === 'one_shot') { this.grants.use(g); await this.#endSessions(g); }
           // The relying party's own explanation (never a secret: it's what the site sent back), so the agent can act on it.
           this.log.append({ errand_id: req.errand_id ?? null, type: 'grant.used', grant_id, detail: { op: t.op, server, tool, status: e.definite ? 'refused' : 'unknown', reason: String(e.message).slice(0, 200) } });
           throw new BrokerError('upstream_error', `${server}/${tool}: ${String(e.message).slice(0, 300)}`, e.upstream ? { upstream: e.upstream } : undefined);
         }
-        this.#use(g, { op: t.op, server, tool, status: 'ok' });
+        await this.#use(g, { op: t.op, server, tool, status: 'ok' });
         return { content };
       },
 
+      // Each of these takes its grant first (#take), checks it again just before the worker acts (#still), and gives a
+      // one-shot grant back if it ends without spending it (release after #use does nothing).
       'browser.open': async (a, req) => {
-        let read_only = !!a.read_only;
-        const g = await guard(req, a.grant_id, async () => {
-          const g = this.grants.usable(a.grant_id, BROWSE);
-          await this.#inside(g, a.url);
-          if (!g.ops.includes('search') && !g.ops.includes('login')) read_only = true;   // read-only grant, read-only session
-          return g;
-        });
-        const r = await this.worker.open({ ...a, read_only, grant_id: g.grant_id });
-        this.sessions.set(r.session_id, { grant_id: g.grant_id, url: a.url });
-        this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'open', url: a.url, read_only, mode: this.#mode(g), conforming: true, status: 'ok' });
-        return r;
+        const h = this.#take(req, a.grant_id, BROWSE), g = h.g;
+        try {
+          await guard(req, a.grant_id, () => this.#inside(g, a.url));
+          const read_only = !!a.read_only || (!g.ops.includes('search') && !g.ops.includes('login'));   // read-only grant, read-only session
+          this.#still(req, h, BROWSE);
+          const r = await this.worker.open({ ...a, read_only, grant_id: g.grant_id });
+          // Revoked or expired while the worker opened it: nothing would ever close this session, so close it now.
+          try { this.#still(req, h, BROWSE); } catch (e) {
+            try { await this.worker.close({ grant_id: g.grant_id, session_id: r.session_id }); } catch {}
+            throw e;
+          }
+          this.sessions.set(r.session_id, { grant_id: g.grant_id, url: a.url });
+          await this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'open', url: a.url, read_only, mode: this.#mode(g), conforming: true, status: 'ok' });
+          return r;
+        } finally { this.grants.release(g, h.token); }
       },
 
       'browser.extract': async (a, req) => {
-        const g = await guard(req, a.grant_id, async () => { const g = this.grants.usable(a.grant_id, BROWSE); await this.#session(g, a.session_id); return g; });
-        const r = await this.worker.extract(a);
-        this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'extract', target: a.target, mode: this.#mode(g), conforming: true, status: 'ok' });
-        return r;
+        const h = this.#take(req, a.grant_id, BROWSE), g = h.g;
+        try {
+          await guard(req, a.grant_id, () => this.#session(g, a.session_id));
+          this.#still(req, h, BROWSE, a.session_id);
+          const r = await this.worker.extract(a);
+          await this.#use(g, { op: g.ops.includes('read') ? 'read' : 'search', browser: 'extract', target: a.target, mode: this.#mode(g), conforming: true, status: 'ok' });
+          return r;
+        } finally { this.grants.release(g, h.token); }
       },
 
       'browser.act': async (a, req) => {
-        await guard(req, a.grant_id, async () => { const g = this.grants.usable(a.grant_id, BROWSE); await this.#session(g, a.session_id); });
-        // A binding click: take its one-shot grant for this call before the worker runs (no await in between).
+        // A binding click: take its one-shot grant for this call before anything is awaited.
         let held = null;
         if (a.book_grant_id) {
-          held = await guard(req, a.book_grant_id, async () => {
-            const bg = this.grants.usable(a.book_grant_id);
-            if (bg.mode !== 'one_shot' || !bg.ops.some((o) => BINDING_OPS.has(o))) throw new BrokerError('one_shot_required', 'a binding click needs a one-shot grant');
-            return { g: bg, token: this.grants.reserve(bg) };
-          });
+          held = this.#take(req, a.book_grant_id);
+          try {
+            if (held.g.mode !== 'one_shot' || !held.g.ops.some((o) => BINDING_OPS.has(o))) throw new BrokerError('one_shot_required', 'a binding click needs a one-shot grant');
+            // The worker checks the page against these (browser-worker.md), for a pay click as for a booking.
+            const c = held.g.constraints ?? {};
+            if (!(c.venue && c.date && c.time && Number.isInteger(c.party_size))) throw new BrokerError('constraint_mismatch', 'a binding click needs a grant with venue, date, time and party_size to check the page against');
+          } catch (e) { this.grants.release(held.g, held.token); throw this.#refuse(req.errand_id, a.book_grant_id, e); }
         }
+        try {
+          // The browse grant isn't spent by a click, so it's only checked, not taken.
+          const look = await guard(req, a.grant_id, async () => { const g = this.grants.usable(a.grant_id, BROWSE); await this.#session(g, a.session_id); return g; });
+          // Approved for one site, spent on that site: the session must be on the book grant's origin too.
+          if (held) await guard(req, a.book_grant_id, () => this.#session(held.g, a.session_id));
+          this.#still(req, { g: look, token: null }, BROWSE, a.session_id);
+          if (held) this.#still(req, held, [], a.session_id);
+        } catch (e) { if (held) this.grants.release(held.g, held.token); throw e; }
         let r;
         try { r = await this.worker.act(a); } catch (e) {
           // Refused before anything was submitted: the grant goes back. Anything else may have submitted: spent.
           // (Not navigation_failed or blocked_by_site: a submit can lose its answer or be redirected after it commits.)
           const before = ['constraint_mismatch', 'target_not_found', 'session_not_found', 'read_only_session', 'origin_mismatch'].includes(e?.code);
-          if (held) { if (before) this.grants.release(held.g, held.token); else this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: String(e?.message).slice(0, 200) }); }
+          if (held) { if (before) this.grants.release(held.g, held.token); else await this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: String(e?.message).slice(0, 200) }); }
           if (e?.code === 'constraint_mismatch') throw this.#refuse(req.errand_id, a.book_grant_id || a.grant_id, new BrokerError('constraint_mismatch', e.message));
           throw e;
         }
         if (held && !r.binding) this.grants.release(held.g, held.token);
         if (r.binding) {
           const conf = /Confirmation (\S+)/.exec(r.page.text)?.[1];
-          this.#use(r.binding, { op: r.binding.ops.find((o) => BINDING_OPS.has(o)), browser: 'act', target: a.target, mode: this.#mode(r.binding),
+          await this.#use(r.binding, { op: r.binding.ops.find((o) => BINDING_OPS.has(o)), browser: 'act', target: a.target, mode: this.#mode(r.binding),
             conforming: true, ...(conf ? { confirmation: conf } : {}), page_title: r.page.title, status: 'ok' });
         }
         return { page: r.page };
       },
 
       'browser.await_login': async (a, req) => {
-        const g = await guard(req, a.grant_id, async () => { const g = this.grants.usable(a.grant_id, 'login'); await this.#session(g, a.session_id); return g; });
-        const r = await this.worker.await_login(a);
-        this.#use(g, { op: 'login', login_mode: 'operator_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
-        return r;
+        const h = this.#take(req, a.grant_id, 'login'), g = h.g;
+        try {
+          await guard(req, a.grant_id, () => this.#session(g, a.session_id));
+          this.#still(req, h, 'login', a.session_id);
+          const r = await this.worker.await_login(a);
+          await this.#use(g, { op: 'login', login_mode: 'operator_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
+          return r;
+        } finally { this.grants.release(g, h.token); }
       },
 
-      'browser.fill_login': async (a, req) => guard(req, a.grant_id, async () => {
-        const g = this.grants.usable(a.grant_id, 'login');
-        await this.#session(g, a.session_id);
-        if (g.domain) {
-          const store_approval = this.store.approval;
-          let c;
-          try { c = await this.#siteLogin(g); } catch (e) {
-            if (store_approval !== 'none') this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id,
-              detail: { op: 'login', domain: g.domain, store_approval, status: e.code === 'store_no_answer' ? 'no_answer' : 'not_found' } });
-            throw e;
-          }
-          const r = await this.worker.fill_login({ grant_id: a.grant_id, session_id: a.session_id, credential: c.record.ref });
-          this.#use(g, { op: 'login', domain: g.domain, credential_ref: c.record.ref, login_mode: 'broker_filled', store_approval, mode: this.#mode(g), conforming: true, status: 'ok' });
+      'browser.fill_login': async (a, req) => {
+        const h = this.#take(req, a.grant_id, 'login'), g = h.g;
+        const store_approval = this.store.approval;
+        try {
+          // The login to fill: for a credential-by-site grant, the store's item (a fetch-only store asks the person).
+          const c = await guard(req, a.grant_id, async () => {
+            await this.#session(g, a.session_id);
+            if (!g.domain) {
+              if (a.credential !== undefined && a.credential !== g.credential) throw new BrokerError('op_not_granted', `grant is for ${g.credential}`);
+              return null;
+            }
+            try { return await this.#siteLogin(g); } catch (e) {
+              if (store_approval !== 'none') this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id,
+                detail: { op: 'login', domain: g.domain, store_approval, status: e.code === 'store_no_answer' ? 'no_answer' : 'not_found' } });
+              throw e;
+            }
+          });
+          this.#still(req, h, 'login', a.session_id);
+          const r = await this.worker.fill_login({ grant_id: a.grant_id, session_id: a.session_id, credential: c ? c.record.ref : g.credential });
+          await this.#use(g, c ? { op: 'login', domain: g.domain, credential_ref: c.record.ref, login_mode: 'broker_filled', store_approval, mode: this.#mode(g), conforming: true, status: 'ok' }
+            : { op: 'login', credential: g.credential, login_mode: 'broker_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
           return r;
-        }
-        if (a.credential !== undefined && a.credential !== g.credential) throw new BrokerError('op_not_granted', `grant is for ${g.credential}`);
-        const r = await this.worker.fill_login({ grant_id: a.grant_id, session_id: a.session_id, credential: g.credential });
-        this.#use(g, { op: 'login', credential: g.credential, login_mode: 'broker_filled', mode: this.#mode(g), conforming: true, status: 'ok' });
-        return r;
-      }),
+        } finally { this.grants.release(g, h.token); }
+      },
 
       'browser.fill_code': async (a, req) => {
-        const g = await guard(req, a.grant_id, async () => { const g = this.grants.usable(a.grant_id, 'login'); await this.#session(g, a.session_id); return g; });
-        let code;
-        if (a.source === 'store_totp') {
-          const ref = g.credential_ref ?? g.credential;
-          code = ref && this.store.totp ? await this.store.totp(ref) : null;
-          if (!code) throw this.#refuse(req.errand_id, a.grant_id, new BrokerError('op_not_granted', 'this login has no TOTP in the store'));
-        } else if (a.source === 'person') {
-          if ([...this.codeSlots.values()].some((s) => s.session_id === a.session_id)) throw new BrokerError('bad_request', 'a code slot is already open for this session');
-          // The slot is for the channel the person is talking on: only that adapter hears of it or can fill it.
-          if (a.channel === undefined && this.channels.size > 1) throw new BrokerError('bad_request', 'more than one channel adapter: name the one the person is on (channel)');
-          if (a.channel !== undefined && !this.channels.has(a.channel)) throw new BrokerError('bad_request', `no channel adapter ${a.channel}`);
-          const channel = a.channel ?? [...this.channels][0] ?? null;
-          // The session check above awaited the store: check again, with nothing awaited before the slot opens.
-          try {
-            this.grants.usable(a.grant_id, 'login');
-            if (!this.sessions.has(a.session_id)) throw new BrokerError('origin_mismatch', 'the session closed');
-          } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
-          const slot_id = ulid(), ms = Math.min(a.timeout_seconds ?? 300, 900) * 1000;
-          code = await new Promise((resolve, reject) => {
-            const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new BrokerError('code_timeout', 'no code from the person')); }, ms);
-            const expires_at = new Date(Date.now() + ms).toISOString();
-            this.codeSlots.set(slot_id, { session_id: a.session_id, grant_id: g.grant_id, channel, seq: ++this.slotSeq, resolve, reject, timer, expires_at });
-            for (const w of [...this.slotWaiters]) w();
-          }).catch((e) => { throw this.#refuse(req.errand_id, a.grant_id, e); });
-        } else throw new BrokerError('bad_request', 'source must be store_totp or person');
-        // Waiting may have taken minutes: the grant and the session must still be live when the code is filled.
+        const h = this.#take(req, a.grant_id, 'login'), g = h.g;
         try {
-          this.grants.usable(a.grant_id, 'login');
-          if (!this.sessions.has(a.session_id)) throw new BrokerError('origin_mismatch', 'the session closed while waiting for the code');
-        } catch (e) { throw this.#refuse(req.errand_id, a.grant_id, e); }
-        const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
-        this.#use(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
-        return r;
+          await guard(req, a.grant_id, () => this.#session(g, a.session_id));
+          let code;
+          if (a.source === 'store_totp') {
+            const ref = g.credential_ref ?? g.credential;
+            code = ref && this.store.totp ? await this.store.totp(ref) : null;
+            if (!code) throw this.#refuse(req.errand_id, a.grant_id, new BrokerError('op_not_granted', 'this login has no TOTP in the store'));
+          } else if (a.source === 'person') {
+            if ([...this.codeSlots.values()].some((s) => s.session_id === a.session_id)) throw new BrokerError('bad_request', 'a code slot is already open for this session');
+            // The slot is for the channel the person is talking on: only that adapter hears of it or can fill it.
+            if (a.channel === undefined && this.channels.size > 1) throw new BrokerError('bad_request', 'more than one channel adapter: name the one the person is on (channel)');
+            if (a.channel !== undefined && !this.channels.has(a.channel)) throw new BrokerError('bad_request', `no channel adapter ${a.channel}`);
+            const channel = a.channel ?? [...this.channels][0] ?? null;
+            // The session check above awaited the store: check again, with nothing awaited before the slot opens.
+            this.#still(req, h, 'login', a.session_id);
+            const slot_id = ulid(), ms = Math.min(a.timeout_seconds ?? 300, 900) * 1000;
+            code = await new Promise((resolve, reject) => {
+              const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new BrokerError('code_timeout', 'no code from the person')); }, ms);
+              const expires_at = new Date(Date.now() + ms).toISOString();
+              this.codeSlots.set(slot_id, { session_id: a.session_id, grant_id: g.grant_id, channel, seq: ++this.slotSeq, resolve, reject, timer, expires_at });
+              for (const w of [...this.slotWaiters]) w();
+            }).catch((e) => { throw this.#refuse(req.errand_id, a.grant_id, e); });
+          } else throw new BrokerError('bad_request', 'source must be store_totp or person');
+          // Waiting may have taken minutes: the grant and the session must still be live when the code is filled.
+          this.#still(req, h, 'login', a.session_id);
+          const r = await this.worker.fill_code({ grant_id: a.grant_id, session_id: a.session_id, code });
+          await this.#use(g, { op: 'login', browser: 'fill_code', source: a.source, mode: this.#mode(g), conforming: true, status: 'ok' });
+          return r;
+        } finally { this.grants.release(g, h.token); }
       },
 
       // contracts 0.4: how a channel adapter learns a slot opened. It waits here (long poll) on its own broker socket,

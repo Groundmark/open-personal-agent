@@ -196,3 +196,36 @@ test('a setup request cut off mid-body puts the link back', async () => {
     assert.equal(fs.readdirSync(s.dir).filter((f) => f.startsWith('enroll.json.claimed')).length, 0);
   } finally { await s.approval.close(); }
 });
+
+test('the person can revoke from the approval page: an approved grant, or a spent one-shot one', async () => {
+  const s = await setup();
+  try {
+    const g = await s.ask();
+    assert.equal((await call(s.port, 'POST', `/approve/${g.grant_id}/revoke`, {})).status, 410);   // pending: that's declining
+    s.broker.decide(g.grant_id, true);
+    s.broker.sessions.set('s1', { grant_id: g.grant_id, url: 'https://table.example/' });
+    const shown = (await call(s.port, 'GET', `/approve/${g.grant_id}`)).body;
+    assert.match(shown, /You approved this/);
+    assert.match(shown, /id="revoke"/);
+    assert.equal((await call(s.port, 'POST', `/approve/${g.grant_id}/revoke`, {}, { origin: 'https://evil.test' })).status, 403);
+    const r = await call(s.port, 'POST', `/approve/${g.grant_id}/revoke`, {});
+    assert.deepEqual(r.body, { ok: true, grant_id: g.grant_id, state: 'revoked' });
+    assert.equal(s.broker.grants.get(g.grant_id).state, 'revoked');
+    assert.deepEqual(s.events, ['approved', 'revoked']);   // the core didn't ask for this, so it's told
+    assert.equal(s.broker.sessions.size, 0);                // its sessions end with it, as with grant.revoke
+    const after = (await call(s.port, 'GET', `/approve/${g.grant_id}`)).body;
+    assert.match(after, /This was revoked/);
+    assert.doesNotMatch(after, /id="revoke"/);
+    assert.equal((await call(s.port, 'POST', `/approve/${g.grant_id}/revoke`, {})).status, 410);
+    const log = fs.readFileSync(path.join(s.dir, 'actions.jsonl'), 'utf8');
+    assert.match(log, /"by":"person"[^\n]*"type":"grant\.revoked"/);
+    // A spent one-shot grant, by its short link: revoking it stops declarations of the act.
+    const used = await s.ask();
+    s.broker.decide(used.grant_id, true);
+    s.broker.grants.use(s.broker.grants.get(used.grant_id));
+    const code = s.broker.grants.get(used.grant_id).code;
+    assert.match((await call(s.port, 'GET', `/a/${code}`)).body, /id="revoke"/);
+    assert.equal((await call(s.port, 'POST', `/a/${code}/revoke`, {})).status, 200);
+    await assert.rejects(s.broker.handlers()['identity.declaration']({ grant_id: used.grant_id, act: 'book' }, { errand_id: null }), { code: 'grant_revoked' });
+  } finally { await s.approval.close(); }
+});
