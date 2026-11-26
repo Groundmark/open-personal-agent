@@ -1,0 +1,2 @@
+{ "name": "Your agent", "short_name": "Agent", "start_url": "/", "display": "standalone", "background_color": "#F4EEE2", "theme_color": "#1B2230",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }] }
