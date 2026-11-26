@@ -38,7 +38,7 @@ The fake restaurant's confirmation numbers are derived from the booking, not ran
 - **A real-browser worker fixture** (Playwright against `site/`). The HTTP worker covers the contract, not JavaScript-heavy sites.
 - **A real MCP wire fixture.** `FAKE_MCP` is in-process; a fixture speaking the MCP protocol is still to come.
 - **Socket ownership.** The fixture runs as one Unix user, so it proves the caller by socket path and the `caller` field only. A real broker gives each socket to its caller's user (`0600`) and may check `SO_PEERCRED`.
-- **`standing_order_origins` and `edit_order` in the worker.** The read-only refusal is covered. A non-read-only session on a standing-order site doesn't yet demand an `edit_order` grant.
+- **`standing_order_origins` and `edit_order` in the worker.** The read-only refusal is covered. The worker can check only a booking page, so it refuses an `edit_order` click (`constraint_mismatch`) rather than click it unchecked. A non-read-only session on a standing-order site doesn't yet demand an `edit_order` grant.
 
 ## Contract questions settled in 0.2
 

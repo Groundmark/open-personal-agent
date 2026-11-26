@@ -110,6 +110,35 @@ test('browser: logins are bound to their origin, and secrets cannot be typed', a
   } finally { await site.close(); }
 });
 
+test('browser: a binding click is checked for its op and its site, or refused; never clicked unchecked', async () => {
+  const site = await startSite();
+  const store = new FixtureCredentialStore();
+  store.setOrigin('fake-table', site.origin);
+  let grant = null;
+  const w = new BrowserWorker({ store, getBookGrant: () => grant });
+  try {
+    const { session_id } = await w.open({ url: `${site.origin}/confirm?r=casa-verde&date=2026-12-04&time=19:00&covers=2` });
+    // A click sent with a binding grant is checked even when its label doesn't look binding.
+    grant = { ops: ['book'], constraints: BOOK };
+    await w.fill_login({ session_id, credential: 'fake-table' });
+    await assert.rejects(w.act({ session_id, action: 'click', target: 'Sign in', book_grant_id: 'g' }), { code: 'constraint_mismatch' });
+    await w.act({ session_id, action: 'click', target: 'Sign in' });
+    // edit_order: this worker can't check a page for it, so it refuses rather than click.
+    grant = { ops: ['edit_order'], constraints: { changes: [{ item: 'milk', quantity: 2 }] } };
+    await assert.rejects(w.act({ session_id, action: 'click', target: 'Complete reservation', book_grant_id: 'g' }), { code: 'constraint_mismatch' });
+    // The page has left the site the session was opened for: refused.
+    grant = { ops: ['book'], constraints: BOOK };
+    const s = w.sessions.get(session_id), opened = s.origin;
+    s.origin = 'https://elsewhere.example';
+    await assert.rejects(w.act({ session_id, action: 'click', target: 'Complete reservation', book_grant_id: 'g' }), { code: 'origin_mismatch' });
+    assert.equal(site.bookings.length, 0);
+    s.origin = opened;
+    const r = await w.act({ session_id, action: 'click', target: 'Complete reservation', book_grant_id: 'g' });
+    assert.equal(r.binding, grant);
+    assert.equal(site.bookings.length, 1);
+  } finally { await site.close(); }
+});
+
 test('browser: a site that refuses declared automation is reported, not worked around', async () => {
   const site = await startSite({ blockAutomation: true });
   const w = new BrowserWorker({ store: new FixtureCredentialStore(), getBookGrant: () => null });

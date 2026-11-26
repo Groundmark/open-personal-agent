@@ -67,7 +67,7 @@ export class BrowserWorker {
 
   async open({ url, read_only = false, grant_id = null }) {
     const id = `s${++this.n}`;
-    const s = { url: null, html: '', cookies: new Map(), form: {}, masked: new Set(), readOnly: read_only, grantId: grant_id, operatorSignedIn: false };
+    const s = { url: null, origin: new URL(url).origin, html: '', cookies: new Map(), form: {}, masked: new Set(), readOnly: read_only, grantId: grant_id, operatorSignedIn: false };
     this.sessions.set(id, s);
     await this.#fetch(s, url);
     return { session_id: id, page: this.#page(s) };
@@ -135,11 +135,21 @@ export class BrowserWorker {
     return null;
   }
 
-  #checkBooking(s, bookGrantId) {
+  /**
+   * The binding click's checks, before anything is sent: the page is still on the site the session was opened
+   * for, the form submits there, and the page shows what the grant was approved for. This worker can check a
+   * booking (for book, and pay for now); anything it can't check (edit_order, for one) is refused, not guessed.
+   */
+  #checkBinding(s, bookGrantId, f) {
     const g = bookGrantId && this.getBookGrant(bookGrantId);
     if (!g) throw new ContractError('constraint_mismatch', 'binding click needs an approved one-shot book grant');
+    const live = new URL(s.url).origin, to = new URL(f.action, s.url).origin;
+    if (live !== s.origin || to !== s.origin) throw new ContractError('origin_mismatch', `the page is on ${live} and submits to ${to}, not ${s.origin}`);
+    if (!g.ops.includes('book') && !g.ops.includes('pay')) {
+      throw new ContractError('constraint_mismatch', `this worker can't check a page for ${g.ops.join(', ')}; the person has to do this step`);
+    }
     const shown = (id) => decode(new RegExp(`<dd id="${id}">([^<]*)</dd>`).exec(s.html)?.[1] || '');
-    const c = g.constraints;
+    const c = g.constraints ?? {};
     const ok = shown('venue') === c.venue && shown('date') === c.date && shown('time') === c.time && Number(shown('party_size')) === c.party_size;
     if (!ok) throw new ContractError('constraint_mismatch', `page shows ${shown('venue')} ${shown('date')} ${shown('time')} x${shown('party_size')}`);
     return g;
@@ -164,7 +174,8 @@ export class BrowserWorker {
         const f = this.#formFor(s, target);
         if (!f) throw new ContractError('target_not_found', target);
         if (s.readOnly) throw new ContractError('read_only_session', `"${target}" submits a form`);
-        if (BINDING.test(target)) binding = this.#checkBooking(s, book_grant_id);
+        // A click sent with a binding grant is checked as binding, whatever its label says.
+        if (book_grant_id || BINDING.test(target)) binding = this.#checkBinding(s, book_grant_id, f);
         const qs = new URLSearchParams(f.fields).toString();
         if (f.method === 'POST') {
           await this.#fetch(s, f.action, { method: 'POST', body: qs, headers: { 'content-type': 'application/x-www-form-urlencoded' } });

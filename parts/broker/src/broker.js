@@ -7,8 +7,8 @@
 //   approvals  { url(grant) } -> the link the person opens; decisions come back via decide()
 import { createHash, createPublicKey, randomBytes, sign } from 'node:crypto';
 import { join } from 'node:path';
-import { ActionsLog } from './actions-log.js';
-import { BINDING_OPS, BrokerError, GrantStore, checkRequest, ulid } from './grants.js';
+import { ActionsLog, clip } from './actions-log.js';
+import { BINDING_OPS, BrokerError, GrantStore, MAX_CODE_WAIT_S, checkRequest, ulid } from './grants.js';
 import { canonicalize } from './jcs.js';
 import { loadOrCreateIdentity } from './identity.js';
 
@@ -47,9 +47,11 @@ export class Broker {
   /** The person's decision, from the approval page (after the passkey check) or a test. */
   decide(grantId, approve, evidence = {}) {
     const g = this.grants.decide(grantId, approve);
-    this.log.append({ errand_id: g.errand_id, type: approve ? 'grant.approved' : 'grant.denied', grant_id: g.grant_id,
-      detail: approve ? { passkey_credential_id: evidence.passkey_credential_id ?? null, bound_hash: g.hash } : {} });
-    this.onGrantEvent(g.grant_id, g.state, g.errand_id);
+    // The decision stands once it's stored, so the core hears of it even if the log write fails.
+    try {
+      this.log.append({ errand_id: g.errand_id, type: approve ? 'grant.approved' : 'grant.denied', grant_id: g.grant_id,
+        detail: approve ? { passkey_credential_id: evidence.passkey_credential_id ?? null, bound_hash: g.hash } : {} });
+    } finally { this.onGrantEvent(g.grant_id, g.state, g.errand_id); }
     return g;
   }
 
@@ -60,24 +62,32 @@ export class Broker {
   async revoke(grantId, reason = '', by = 'core') {
     const before = this.grants.get(grantId).state;
     const g = this.grants.revoke(grantId);
-    if (g.state === 'revoked' && before !== 'revoked') {
-      this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id: grantId, detail: { reason, ...(by !== 'core' ? { by } : {}) } });
-      await this.#endSessions(g);
-      if (by !== 'core') this.onGrantEvent(g.grant_id, 'revoked', g.errand_id);
+    if (g.state !== 'revoked') return g;
+    // The clean-up runs whether or not the log write works, and again on a repeat revoke (it finds nothing
+    // left the second time), so a failed write can't leave sessions open.
+    try {
+      if (before !== 'revoked') this.log.append({ errand_id: g.errand_id, type: 'grant.revoked', grant_id: grantId, detail: { reason, ...(by !== 'core' ? { by } : {}) } });
+    } finally {
+      try { await this.#endSessions(g); } finally {
+        if (before !== 'revoked' && by !== 'core') this.onGrantEvent(g.grant_id, 'revoked', g.errand_id);
+      }
     }
     return g;
   }
 
   /** Expires what has run out. Call it on a timer; the grant store also refuses expired grants on use. */
   async sweep() {
+    // One failed log write doesn't stop the others' clean-up; the first failure is rethrown at the end.
+    let failed = null;
     for (const g of this.grants.sweep(this.pendingSeconds * 1000)) {
-      this.log.append({ errand_id: g.errand_id, type: 'grant.expired', grant_id: g.grant_id, detail: { was: g.prev_state } });
-      await this.#endSessions(g);
+      try { this.log.append({ errand_id: g.errand_id, type: 'grant.expired', grant_id: g.grant_id, detail: { was: g.prev_state } }); } catch (e) { failed ??= e; }
+      try { await this.#endSessions(g); } catch (e) { failed ??= e; }
       this.onGrantEvent(g.grant_id, 'expired', g.errand_id);
     }
     // ...and any session still open under a grant that's no longer live (a one-shot grant spent outside #use, say).
     const ended = new Set([...this.sessions.values()].map((s) => s.grant_id).filter((id) => this.grants.get(id).state !== 'approved'));
-    for (const id of ended) await this.#endSessions(this.grants.get(id));
+    for (const id of ended) { try { await this.#endSessions(this.grants.get(id)); } catch (e) { failed ??= e; } }
+    if (failed) throw failed;
   }
 
   async #endSessions(g) {
@@ -113,9 +123,10 @@ export class Broker {
 
   async #use(g, detail) {
     this.grants.use(g);
-    this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail });
-    // A one-shot grant is spent by its use, and a session lives no longer than its grant.
-    if (g.mode === 'one_shot') await this.#endSessions(g);
+    try { this.log.append({ errand_id: g.errand_id, type: 'grant.used', grant_id: g.grant_id, detail }); } finally {
+      // A one-shot grant is spent by its use, and a session lives no longer than its grant.
+      if (g.mode === 'one_shot') await this.#endSessions(g);
+    }
   }
 
   /**
@@ -313,8 +324,8 @@ export class Broker {
           // else (5xx, timeout, connection lost) might have gone through, so a one-shot grant counts as used.
           if (e.definite) this.grants.release(g, token); else if (g.mode === 'one_shot') { this.grants.use(g); await this.#endSessions(g); }
           // The relying party's own explanation (never a secret: it's what the site sent back), so the agent can act on it.
-          this.log.append({ errand_id: req.errand_id ?? null, type: 'grant.used', grant_id, detail: { op: t.op, server, tool, status: e.definite ? 'refused' : 'unknown', reason: String(e.message).slice(0, 200) } });
-          throw new BrokerError('upstream_error', `${server}/${tool}: ${String(e.message).slice(0, 300)}`, e.upstream ? { upstream: e.upstream } : undefined);
+          this.log.append({ errand_id: req.errand_id ?? null, type: 'grant.used', grant_id, detail: { op: t.op, server, tool, status: e.definite ? 'refused' : 'unknown', reason: clip(e.message, 200) } });
+          throw new BrokerError('upstream_error', `${server}/${tool}: ${clip(e.message, 300)}`, e.upstream ? { upstream: e.upstream } : undefined);
         }
         await this.#use(g, { op: t.op, server, tool, status: 'ok' });
         return { content };
@@ -358,9 +369,11 @@ export class Broker {
           held = this.#take(req, a.book_grant_id);
           try {
             if (held.g.mode !== 'one_shot' || !held.g.ops.some((o) => BINDING_OPS.has(o))) throw new BrokerError('one_shot_required', 'a binding click needs a one-shot grant');
-            // The worker checks the page against these (browser-worker.md), for a pay click as for a booking.
-            const c = held.g.constraints ?? {};
-            if (!(c.venue && c.date && c.time && Number.isInteger(c.party_size))) throw new BrokerError('constraint_mismatch', 'a binding click needs a grant with venue, date, time and party_size to check the page against');
+            // The worker checks the page against these (browser-worker.md): a booking's details for book (and, for
+            // now, pay), the changes for edit_order. A grant without what its op is checked against can't click.
+            const c = held.g.constraints ?? {}, ops = held.g.ops;
+            if ((ops.includes('book') || ops.includes('pay')) && !(c.venue && c.date && c.time && Number.isInteger(c.party_size))) throw new BrokerError('constraint_mismatch', 'a book or pay click needs a grant with venue, date, time and party_size to check the page against');
+            if (ops.includes('edit_order') && !(Array.isArray(c.changes) && c.changes.length)) throw new BrokerError('constraint_mismatch', 'an edit_order click needs a grant with the changes to check the page against');
           } catch (e) { this.grants.release(held.g, held.token); throw this.#refuse(req.errand_id, a.book_grant_id, e); }
         }
         try {
@@ -376,7 +389,7 @@ export class Broker {
           // Refused before anything was submitted: the grant goes back. Anything else may have submitted: spent.
           // (Not navigation_failed or blocked_by_site: a submit can lose its answer or be redirected after it commits.)
           const before = ['constraint_mismatch', 'target_not_found', 'session_not_found', 'read_only_session', 'origin_mismatch'].includes(e?.code);
-          if (held) { if (before) this.grants.release(held.g, held.token); else await this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: String(e?.message).slice(0, 200) }); }
+          if (held) { if (before) this.grants.release(held.g, held.token); else await this.#use(held.g, { op: 'book', browser: 'act', target: a.target, status: 'unknown', reason: clip(e?.message, 200) }); }
           if (e?.code === 'constraint_mismatch') throw this.#refuse(req.errand_id, a.book_grant_id || a.grant_id, new BrokerError('constraint_mismatch', e.message));
           throw e;
         }
@@ -442,7 +455,7 @@ export class Broker {
             const channel = a.channel ?? [...this.channels][0] ?? null;
             // The session check above awaited the store: check again, with nothing awaited before the slot opens.
             this.#still(req, h, 'login', a.session_id);
-            const slot_id = ulid(), ms = Math.min(a.timeout_seconds ?? 300, 900) * 1000;
+            const slot_id = ulid(), ms = Math.min(a.timeout_seconds ?? 300, MAX_CODE_WAIT_S) * 1000;
             code = await new Promise((resolve, reject) => {
               const timer = setTimeout(() => { this.codeSlots.delete(slot_id); reject(new BrokerError('code_timeout', 'no code from the person')); }, ms);
               const expires_at = new Date(Date.now() + ms).toISOString();
