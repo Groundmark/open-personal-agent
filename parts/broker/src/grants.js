@@ -9,6 +9,8 @@ import { writeAtomic } from './fsutil.js';
 export const OPS = ['read', 'search', 'login', 'book', 'edit_order', 'pay'];
 export const BINDING_OPS = new Set(['book', 'edit_order', 'pay']);
 export const MAX_TTL = { standing: 7 * 24 * 3600, one_shot: 3600 };
+/** The longest browser.fill_code waits for the person's code (contracts/broker.md). */
+export const MAX_CODE_WAIT_S = 900;
 
 export class BrokerError extends Error {
   constructor(code, message, detail) { super(message || code); this.code = code; if (detail) this.detail = detail; }

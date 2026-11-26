@@ -490,6 +490,60 @@ test('browser binding click: the book or pay grant must be for the session\'s si
   const pay = await ask({ credential: 'other-site', ops: ['pay'], constraints: BOOK });
   assert.equal(await act(pay), 'ok');
   assert.equal(acts, 1);
+  // edit_order is checked against its changes, not a booking's details: it reaches the worker, which checks the page.
+  const edit = await ask({ credential: 'other-site', ops: ['edit_order'], constraints: { changes: [{ item: 'milk', quantity: 2 }] } });
+  assert.equal(await act(edit), 'ok');
+  assert.equal(acts, 2);
+});
+
+test('a failed log write doesn\'t skip the clean-up: sessions close and the core hears, on revoke, decide and sweep', async () => {
+  const closed = [];
+  const worker = { mode: 'agent_browser', open: async () => ({ session_id: `w${closed.length}`, page: {} }), close: async ({ session_id }) => { closed.push(session_id); } };
+  const store2 = { approval: 'none', label: 't', async get(ref) { return ref === 'fake-table' ? { record: { ref, origin: 'https://table.example' }, secret: {} } : null; } };
+  const { b, h, events } = mk(tmp(), { worker, store: store2 });
+  const ask = async () => (await h['grant.request']({ credential: 'fake-table', ops: ['search'], mode: 'standing', ttl_seconds: 600, purpose: 'Look' }, env('x', {}))).grant_id;
+  const open = async (g) => (await h['browser.open']({ grant_id: g, url: 'https://table.example/' }, env('x', {}))).session_id;
+  const g1 = await ask(), g2 = await ask();
+  b.decide(g1, true);
+  const s1 = await open(g1);
+  const append = b.log.append.bind(b.log);
+  b.log.append = () => { throw new Error('disk full'); };
+  // The person revokes from the page; the log write fails, and the session still closes and the core is told.
+  await assert.rejects(b.revoke(g1, 'stop', 'person'), /disk full/);
+  assert.deepEqual(closed, [s1]);
+  assert.equal(b.sessions.size, 0);
+  assert.deepEqual(events.at(-1), [g1, 'revoked']);
+  // A decision stands once stored: the core hears of it even if the log write fails.
+  assert.throws(() => b.decide(g2, true), /disk full/);
+  assert.deepEqual(events.at(-1), [g2, 'approved']);
+  b.log.append = append;
+  const s2 = await open(g2);
+  // Expiry: the grant runs out, the log write fails, and the session still closes.
+  b.grants.get(g2).expires_at = new Date(Date.now() - 1000).toISOString();
+  b.log.append = () => { throw new Error('disk full'); };
+  await assert.rejects(b.sweep(), /disk full/);
+  assert.ok(closed.includes(s2));
+  assert.deepEqual(events.at(-1), [g2, 'expired']);
+});
+
+test('the actions log takes text that isn\'t well-formed, and still refuses a secret', async () => {
+  const { ActionsLog, clip } = await import('../src/actions-log.js');
+  const { generateKeyPairSync } = await import('node:crypto');
+  const file = path.join(tmp(), 'actions.jsonl');
+  const log = new ActionsLog(file, generateKeyPairSync('ed25519').privateKey);
+  const half = '🍽️ table'.slice(0, 1);                      // half an emoji: a lone surrogate
+  const line = log.append({ type: 'grant.refused', detail: { message: `page says ${half}`, [half]: [half] } });
+  assert.equal(line.detail.message, 'page says \ufffd');
+  assert.ok(fs.readFileSync(file, 'utf8').includes('page says'));
+  assert.equal(clip('ab🍽️cd', 3), 'ab🍽');                    // cut between characters, not inside one
+  class Secret { constructor(v) { this.v = v; } }
+  assert.throws(() => log.append({ type: 'grant.refused', detail: { s: new Secret('x') } }), /not a plain object/);
+});
+
+test('a broker connection outlasts the longest wait for a one-time code', async () => {
+  const { IDLE_MS } = await import('../src/sockets.js');
+  const { MAX_CODE_WAIT_S } = await import('../src/grants.js');
+  assert.ok(IDLE_MS >= MAX_CODE_WAIT_S * 1000 + 60_000);
 });
 
 test('web services: a signed request never follows a redirect, and a redirect is not a success', async (t) => {

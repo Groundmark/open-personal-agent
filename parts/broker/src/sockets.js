@@ -4,9 +4,12 @@
 // no root. In tests and development, listen() makes them at the given paths, mode 0600.
 import { createServer } from 'node:net';
 import { chmodSync, existsSync, lstatSync, unlinkSync } from 'node:fs';
-import { BrokerError } from './grants.js';
+import { BrokerError, MAX_CODE_WAIT_S } from './grants.js';
 
 const MAX_REQUEST = 256 * 1024;
+// A connection may sit idle while fill_code waits for the person, so it must outlast the longest wait plus the
+// time to fill the code and answer. Equal to the wait, it dropped just as a late code arrived.
+export const IDLE_MS = (MAX_CODE_WAIT_S + 5 * 60) * 1000;
 
 /** Handles one parsed envelope arriving on `caller`'s socket. */
 export async function dispatch(handlers, caller, req) {
@@ -34,7 +37,7 @@ export async function dispatch(handlers, caller, req) {
 function server(handlers, caller) {
   return createServer((conn) => {
     let buf = Buffer.alloc(0), done = false;
-    conn.setTimeout(15 * 60_000, () => conn.destroy());   // fill_code can wait minutes for the person
+    conn.setTimeout(IDLE_MS, () => conn.destroy());
     conn.on('error', () => {});
     conn.on('data', async (chunk) => {
       if (done) return;
