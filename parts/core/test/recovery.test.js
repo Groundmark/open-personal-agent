@@ -226,6 +226,31 @@ test('after a send gets through, the next failure is retried soon again (no stal
   } finally { await w.stop(); }
 });
 
+test('an empty reply from the model isn\'t kept, so the next turn isn\'t refused for it', async () => {
+  const w = await world((args) => (lastText(args) === 'first' ? { content: [], tool_calls: [], stop: 'end' } : say('Second.')));
+  try {
+    const core = new Core(w.opts());
+    await w.inbound(core, 'first');
+    await until(() => w.infers.length === 1);
+    await w.inbound(core, 'second');
+    await until(() => w.sent.length === 1);
+    assert.equal(w.sent[0], 'Second.');
+    assert.ok(w.infers[1].messages.every((m) => typeof m.content === 'string' || m.content.length));
+  } finally { await w.stop(); }
+});
+
+test('an empty reply saved by an earlier version is dropped at start', async () => {
+  const w = await world(() => say('OK.'));
+  try {
+    fs.writeFileSync(path.join(w.dir, 'errands.json'), JSON.stringify({ 'web:person': { errand_id: 'E1', channel: 'web', to: 'person', grants: {}, last_active: new Date().toISOString(),
+      transcript: [{ role: 'user', content: 'first' }, { role: 'assistant', content: [] }] } }));
+    const core = new Core(w.opts());
+    await w.inbound(core, 'second');
+    await until(() => w.sent.length === 1);
+    assert.deepEqual(w.infers[0].messages.map((m) => m.role), ['user', 'user']);
+  } finally { await w.stop(); }
+});
+
 test('a message sent twice (same message_id) is answered once, before and after it is handled', async () => {
   const w = await world(() => say('Hi.'));
   try {

@@ -21,7 +21,7 @@ The agent itself ([contract](../../contracts/core.md)): read the message, think,
 Not yet: `read_*`, sign-in tools (`ask_to_sign_in`, `sign_in_with_saved_login`, `enter_code`), `read_context`, `request_order_change`, deadlines from `notices`.
 
 ```
-npm test   # 32 tests, ~9 s. 7 with the fixtures around the real core (a booking end to end, a decline, recovery after a restart); 25 in test/recovery.test.js with stand-ins, including the real core killed with SIGKILL mid-turn and started again
+npm test   # 34 tests, ~9 s. 7 with the fixtures around the real core (a booking end to end, a decline, recovery after a restart); 27 in test/recovery.test.js with stand-ins, including the real core killed with SIGKILL mid-turn and started again
 ```
 
 Tried live with `anthropic/claude-haiku-5.5` (via `parts/router` and OpenRouter): it books straight away when the message has everything, and asks for what's missing otherwise.

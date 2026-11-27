@@ -46,6 +46,7 @@ export class Core {
     this.errands = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : {};
     for (const e of Object.values(this.errands)) {   // state from before these fields existed
       e.inbox ??= []; e.outbox ??= []; e.seen ??= [];
+      e.transcript = e.transcript.filter((m) => !(m.role === 'assistant' && Array.isArray(m.content) && !m.content.length));   // empty replies kept by earlier versions
       // An approval link saved by the first version, whose reply never went out: a turn is owed to send it.
       if (typeof e.ask === 'string') { e.asks = [...(e.asks ?? []), e.ask]; delete e.ask; e.resume = true; }
     }
@@ -253,7 +254,8 @@ export class Core {
       }
       const { content, tool_calls: calls, stop } = r.result;
       const text = content.map((p) => p.text).join('\n').trim();
-      e.transcript.push({ role: 'assistant', content: [...content, ...calls.map((c) => ({ type: 'tool_call', ...c }))] });
+      // An empty reply (no text, no calls) isn't kept: a message with no parts is refused by the router.
+      if (content.length || calls.length) e.transcript.push({ role: 'assistant', content: [...content, ...calls.map((c) => ({ type: 'tool_call', ...c }))] });
       if (!calls.length) {
         return stop === 'refused' ? text || "Sorry, I can't help with that." : text;
       }
