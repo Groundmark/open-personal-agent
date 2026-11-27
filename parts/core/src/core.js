@@ -26,7 +26,10 @@ const BOOK = { type: 'object', additionalProperties: false, required: ['service'
 // state it can't keep; systemd restarts it from the last checkpoint.
 
 const SEEN = 200;
-const RETRY_MS = [5_000, 30_000, 120_000];   // a failed send is retried, then waits for the next event or a restart
+const RETRY_MS = [5_000, 30_000, 120_000];   // a failed send is retried after these, then every last one, while anything is owed
+const SEND_TIMEOUT_MS = 30_000;              // a channel that takes the connection but never answers doesn't hold up the errand
+// Refusals that a retry can't change: the message is logged as undeliverable and dropped, so it doesn't block later ones.
+const UNDELIVERABLE = ['recipient_not_allowed', 'not_paired', 'attachment_too_large', 'bad_request', 'unauthorized_caller'];
 const toolCalls = (m) => (m?.role === 'assistant' && Array.isArray(m.content) ? m.content.filter((p) => p.type === 'tool_call') : []);
 
 export class Core {
@@ -36,8 +39,8 @@ export class Core {
    * channels: { <channel name>: <adapter socket path> }.
    */
   constructor({ stateDir, routerUrl, brokerSocket, channels, services, model = 'default', timezone = 'UTC', idleHours = 6, now = () => new Date(),
-    retryMs = RETRY_MS, reconcileRetryMs = 30_000, onFatal = (err) => { console.error(`core: can't keep state, stopping: ${err.message}`); process.exit(70); } }) {
-    Object.assign(this, { stateDir, routerUrl, brokerSocket, channels, services, model, timezone, idleMs: idleHours * 3600_000, now, retryMs, reconcileRetryMs, onFatal });
+    retryMs = RETRY_MS, reconcileRetryMs = 30_000, sendTimeoutMs = SEND_TIMEOUT_MS, onFatal = (err) => { console.error(`core: can't keep state, stopping: ${err.message}`); process.exit(70); } }) {
+    Object.assign(this, { stateDir, routerUrl, brokerSocket, channels, services, model, timezone, idleMs: idleHours * 3600_000, now, retryMs, reconcileRetryMs, sendTimeoutMs, onFatal });
     this.log = new ConversationLog(join(stateDir, 'conversation.jsonl'));
     this.file = join(stateDir, 'errands.json');
     this.errands = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : {};
@@ -50,7 +53,8 @@ export class Core {
     // another errand's half-finished step.
     this.committed = structuredClone(this.errands);
     this.queues = new Map();
-    this.retries = new Map();
+    this.retries = new Map();   // errand -> failed sends in a row
+    this.timers = new Map();    // errand -> its one pending retry
     this.dead = false;
     this.resumed = false;
   }
@@ -113,6 +117,7 @@ export class Core {
 
   /** Nothing owed and nothing waiting: a new message after the idle time starts a new errand. */
   #finished(e) {
+    // A pending approval ends when the broker says so (approved, denied, or expired after its own waiting time).
     return !e.resume && !e.inbox.length && !e.outbox.length && !e.asks?.length && !Object.values(e.grants ?? {}).some((g) => g.state === 'pending');
   }
 
@@ -159,7 +164,10 @@ export class Core {
       for (const [id, g] of Object.entries(e.grants ?? {})) {
         if (g.state !== 'pending') continue;
         let st;
-        try { st = await this.#broker(e, 'grant.status', { grant_id: id }); } catch (err) { if (!/^[a-z_]+$/.test(err.code ?? '')) unreachable = true; continue; }   // a broker error has a contract code; anything else is the transport
+        try { st = await this.#broker(e, 'grant.status', { grant_id: id }); } catch (err) {
+          if (err.code === 'grant_not_found') st = { state: 'expired' };   // the broker no longer has it: it can't be approved now
+          else { if (!/^[a-z_]+$/.test(err.code ?? '')) unreachable = true; continue; }   // a broker error has a contract code; anything else is the transport
+        }
         const state = st.state === 'consumed' ? 'approved' : st.state;
         if (['approved', 'denied', 'expired'].includes(state)) this.#queue(key, () => this.#grantEvent(key, id, state));
       }
@@ -237,7 +245,12 @@ export class Core {
   async #think(e) {
     for (let step = 0; step < MAX_STEPS; step++) {
       const r = await infer(this.routerUrl, envelope('infer', e.errand_id, { model: this.model, system: this.#system(), messages: this.#window(e), tools: this.#tools() }));
-      if (!r.ok) return `Sorry, I couldn't think that through just now (${r.error}). Please try again in a moment.`;
+      if (!r.ok) {
+        // Once a tool has run this turn (a booking, say), "try again" could mean doing it twice.
+        return this.#actedThisTurn(e)
+          ? `Sorry, I couldn't finish that just now (${r.error}), so I can't tell whether it worked. Please check before trying again.`
+          : `Sorry, I couldn't think that through just now (${r.error}). Please try again in a moment.`;
+      }
       const { content, tool_calls: calls, stop } = r.result;
       const text = content.map((p) => p.text).join('\n').trim();
       e.transcript.push({ role: 'assistant', content: [...content, ...calls.map((c) => ({ type: 'tool_call', ...c }))] });
@@ -265,7 +278,26 @@ export class Core {
     }
   }
 
+  /** True if a tool ran (or may have run) since the message that started this turn. */
+  #actedThisTurn(e) {
+    const t = e.transcript;
+    for (let i = t.length - 1; i >= 0 && t[i].role !== 'user'; i--) {
+      if (t[i].role === 'tool' && t[i].content.some((p) => p.content?.error !== 'not_run')) return true;
+    }
+    return false;
+  }
+
   #keyOf(e) { return Object.keys(this.errands).find((k) => this.errands[k] === e); }
+
+  /** One retry timer per errand: after 5 s, 30 s, then every 2 min for as long as a reply is owed. */
+  #retryLater(key) {
+    if (this.timers.has(key) || this.dead) return;
+    const n = this.retries.get(key) ?? 0;
+    this.retries.set(key, n + 1);
+    const t = setTimeout(() => { this.timers.delete(key); this.#queue(key, () => this.#flush(key)); }, this.retryMs[Math.min(n, this.retryMs.length - 1)]);
+    t.unref();
+    this.timers.set(key, t);
+  }
 
   /** Sends what's owed, oldest first, stopping at the first failure (retried later). */
   async #flush(key) {
@@ -273,19 +305,20 @@ export class Core {
     while (e?.outbox.length) {
       const text = e.outbox[0];
       let r;
-      try { r = await call(this.channels[e.channel], envelope('channel.send', e.errand_id, { channel: e.channel, to: e.to, text, attachments: [] })); } catch (err) { r = { ok: false, error: err.message }; }
-      if (!r?.ok) {
-        console.error(`core: channel.send failed: ${r?.error}`);
-        const n = this.retries.get(key) ?? 0;
-        if (n < this.retryMs.length && !this.dead) {
-          this.retries.set(key, n + 1);
-          setTimeout(() => this.#queue(key, () => this.#flush(key)), this.retryMs[n]).unref();
-        }
+      try {
+        r = await call(this.channels[e.channel], envelope('channel.send', e.errand_id, { channel: e.channel, to: e.to, text, attachments: [] }), { timeoutMs: this.sendTimeoutMs });
+      } catch (err) { r = { ok: false, error: 'channel_unavailable', message: err.message }; }   // no answer at all: try again later
+      if (!r?.ok && !UNDELIVERABLE.includes(r?.error)) {
+        console.error(`core: channel.send failed (${r?.error}), will retry`);
+        this.#retryLater(key);
         return;
       }
-      this.retries.delete(key);
+      this.retries.delete(key);   // it got through: the next failure starts the retries afresh
+      clearTimeout(this.timers.get(key));
+      this.timers.delete(key);
       e.outbox.shift();
-      this.#append({ errand_id: e.errand_id, type: 'message', direction: 'out', channel: e.channel, message_id: r.result?.message_id ?? null, text, attachments: [] });
+      if (r.ok) this.#append({ errand_id: e.errand_id, type: 'message', direction: 'out', channel: e.channel, message_id: r.result?.message_id ?? null, text, attachments: [] });
+      else console.error(`core: channel.send refused (${r.error}); this message can't be delivered and is dropped`);
       this.#save(e);
     }
   }

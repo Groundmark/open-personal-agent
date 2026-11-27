@@ -45,11 +45,14 @@ async function world(route) {
   w.coreSock = path.join(dir, 'core.sock');
   w.broker = await serve(w.brokerSock, {
     'grant.request': async (a) => { const id = `G${w.grants.length + 1}`; w.grants.push(id); if (w.onGrant) await w.onGrant(id); return { grant_id: id, summary: `Approve request ${id}`, approve_url: `https://approve.test/a/${id}` }; },
-    'grant.status': async () => ({ state: 'pending' }),
+    'grant.status': async (a) => (w.grantStatus ? w.grantStatus(a) : { state: 'pending' }),
   });
   w.channel = await serve(w.channelSock, {
     'channel.send': async (a) => {
-      if (w.channelDown) throw Object.assign(new Error('down'), { code: 'unavailable' });
+      w.attempts = (w.attempts ?? 0) + 1;
+      if (w.channelHangs) return hang();
+      if (w.refuse?.(a.text)) throw Object.assign(new Error('refused'), { code: w.refuse(a.text) });
+      if (w.channelDown) throw Object.assign(new Error('down'), { code: 'channel_unavailable' });
       w.sent.push(a.text);
       return { message_id: `m${w.sent.length}`, sent_at: new Date().toISOString() };
     },
@@ -125,6 +128,101 @@ test('a channel that is down: the reply waits, in order, and is delivered once w
     assert.match(w.sent[0], /approve\.test\/a\/G1/);
     assert.equal(w.sent[1], 'OK.');
     assert.deepEqual(w.state()['web:person'].outbox, []);
+  } finally { await w.stop(); }
+});
+
+test('a router failure after a tool ran says it can\'t tell whether it worked; before any tool, try again', async () => {
+  const w = await world((args) => {
+    const t = lastText(args);
+    if (t.startsWith('Book')) return use(['request_booking', BOOK]);
+    return { raw: { ok: false, error: 'provider_error', message: 'provider returned 502' } };   // the router fails on the next step
+  });
+  try {
+    const core = new Core(w.opts());
+    await w.inbound(core, 'Book a table');
+    await until(() => w.sent.length === 1);
+    assert.match(w.sent[0], /^Sorry, I couldn't finish that just now \(provider_error\), so I can't tell whether it worked\. Please check before trying again\.[\s\S]*approve\.test\/a\/G1/);
+    await w.inbound(core, 'hello');
+    await until(() => w.sent.length === 2);
+    assert.match(w.sent[1], /^Sorry, I couldn't think that through just now \(provider_error\)\. Please try again/);
+  } finally { await w.stop(); }
+});
+
+test('a channel down for longer than the first retries: still delivered when it is back, and turns don\'t use up the retries', async () => {
+  const w = await world(() => say('OK.'));
+  try {
+    w.channelDown = true;
+    const core = new Core(w.opts({ retryMs: [30, 60] }));
+    await w.inbound(core, 'one');
+    await w.inbound(core, 'two');
+    await w.inbound(core, 'three');
+    await sleep(500);                                        // many retries' worth, every 60 ms
+    const attempts = w.attempts;
+    assert.ok(attempts >= 6 && attempts < 20, String(attempts));   // one timer, not one per failed flush
+    w.channelDown = false;
+    await until(() => w.sent.length === 3);
+    assert.deepEqual(w.sent, ['OK.', 'OK.', 'OK.']);
+  } finally { await w.stop(); }
+});
+
+test('a send the channel refuses for good is dropped; later replies still go out', async () => {
+  const w = await world((args) => say(lastText(args) === 'first' ? 'too big' : 'fine'));
+  try {
+    w.refuse = (text) => (text === 'too big' ? 'attachment_too_large' : null);
+    const core = new Core(w.opts({ retryMs: [30] }));
+    await w.inbound(core, 'first');
+    await w.inbound(core, 'second');
+    await until(() => w.sent.length === 1);
+    assert.deepEqual(w.sent, ['fine']);
+    assert.deepEqual(w.state()['web:person'].outbox, []);
+  } finally { await w.stop(); }
+});
+
+test('a hung channel doesn\'t hold up the next turn', async () => {
+  const w = await world(() => say('OK.'));
+  try {
+    w.channelHangs = true;
+    const core = new Core(w.opts({ sendTimeoutMs: 100, retryMs: [60_000] }));
+    await w.inbound(core, 'one');
+    await until(() => w.infers.length === 1);
+    await w.inbound(core, 'two');
+    await until(() => w.infers.length === 2, 1500);          // not stuck behind the first send
+    assert.equal(w.state()['web:person'].outbox.length >= 1, true);
+  } finally { await w.stop(); }
+});
+
+test('an approval the broker no longer knows counts as expired, so the errand can end', async () => {
+  const w = await world((args) => say(lastText(args).includes('did not answer in time') ? 'It expired.' : 'OK.'));
+  try {
+    const old = new Date(Date.now() - 7 * 3600_000).toISOString();
+    fs.writeFileSync(path.join(w.dir, 'errands.json'), JSON.stringify({
+      'web:person': { errand_id: 'E1', channel: 'web', to: 'person', transcript: [], last_active: old, grants: { G9: { kind: 'book', state: 'pending', summary: 's' } } },
+    }));
+    w.grantStatus = () => { throw Object.assign(new Error('no such grant'), { code: 'grant_not_found' }); };
+    const core = new Core(w.opts());
+    await core.reconcile();
+    await until(() => w.sent.includes('It expired.'));
+    assert.equal(w.state()['web:person'].grants.G9.state, 'expired');
+    await w.inbound(core, 'a new topic');
+    await until(() => w.state()['web:person'].errand_id !== 'E1');
+  } finally { await w.stop(); }
+});
+
+test('after a send gets through, the next failure is retried soon again (no stale long timer)', async () => {
+  const w = await world(() => say('OK.'));
+  try {
+    w.channelDown = true;
+    const core = new Core(w.opts({ retryMs: [50, 60_000] }));
+    await w.inbound(core, 'one');
+    await until(() => w.attempts >= 2);                      // the 50 ms retry failed too: a 60 s one is pending
+    w.channelDown = false;
+    await w.inbound(core, 'two');                            // this turn's flush gets everything through
+    await until(() => w.sent.length === 2);
+    w.channelDown = true;
+    await w.inbound(core, 'three');
+    await until(() => w.attempts >= 5);
+    w.channelDown = false;
+    await until(() => w.sent.length === 3, 1500);            // retried after 50 ms, not stuck behind the old 60 s timer
   } finally { await w.stop(); }
 });
 
