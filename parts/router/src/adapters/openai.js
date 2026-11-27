@@ -1,7 +1,7 @@
 // Any OpenAI-compatible chat completions endpoint: OpenRouter, a local model server, OpenAI itself.
 // Translates the contract's neutral request and result both ways. Everything from the provider is checked
-// before it is believed: a reply that is cut short, malformed or ends for an unknown reason is a
-// provider_error, never a normal answer. Error messages are fixed text, never the provider's own words
+// before it is believed: a reply that is malformed or ends for an unknown reason is a provider_error, never a
+// normal answer; one cut off at the reply limit is stop "max_tokens" with no tool calls. Error messages are fixed text, never the provider's own words
 // (which can quote the prompt).
 import { RouterError } from '../errors.js';
 import { isObj, isStr, isCount } from '../check.js';
@@ -41,6 +41,13 @@ export function toOpenAI(args, model, defaults = {}) {
 const STOP = { stop: 'end', tool_calls: 'tool_calls', length: 'max_tokens', content_filter: 'refused' };
 const malformed = (what) => new RouterError('provider_error', `malformed reply from provider: ${what}`);
 
+function usageOf(json) {
+  const u = json.usage ?? {};
+  if (!isObj(u)) throw malformed('usage');
+  const count = (v) => { if (v === undefined || v === null) return 0; if (!isCount(v)) throw malformed('usage'); return v; };
+  return { input_tokens: count(u.prompt_tokens), output_tokens: count(u.completion_tokens) };
+}
+
 /** Chat completions response -> contract result. */
 export function fromOpenAI(json, provider) {
   if (!isObj(json) || !Array.isArray(json.choices)) throw malformed('not a chat completion');
@@ -49,6 +56,11 @@ export function fromOpenAI(json, provider) {
   if (!isObj(choice) || !isObj(choice.message)) throw malformed('no message');
   const msg = choice.message;
   if (msg.content !== undefined && msg.content !== null && !isStr(msg.content)) throw malformed('content is not text');
+  // Cut off at the reply limit: any tool call in it may be cut off too, so none is trusted. The caller learns it
+  // needs a larger limit (max_tokens), rather than getting a malformed-reply error.
+  if (choice.finish_reason === 'length' && choice.native_finish_reason !== 'refusal') {
+    return { content: msg.content ? [{ type: 'text', text: msg.content }] : [], tool_calls: [], stop: 'max_tokens', usage: usageOf(json), served_by: { provider, model: isStr(json.model) ? json.model : '' } };
+  }
   if (msg.tool_calls !== undefined && msg.tool_calls !== null && !Array.isArray(msg.tool_calls)) throw malformed('tool_calls is not a list');
   const tool_calls = (msg.tool_calls || []).map((tc) => {
     if (!isObj(tc) || !isStr(tc.id) || !isObj(tc.function) || !isStr(tc.function.name) || !isStr(tc.function.arguments)) throw malformed('a tool call is incomplete');
@@ -63,14 +75,11 @@ export function fromOpenAI(json, provider) {
   else throw new RouterError('provider_error', 'provider finished for an unexpected reason');   // includes OpenRouter's "error", and none at all
   if (stop === 'tool_calls' && !tool_calls.length) throw malformed('finished for tool calls but sent none');
   if (tool_calls.length && stop === 'end') stop = 'tool_calls';
-  const u = json.usage ?? {};
-  if (!isObj(u)) throw malformed('usage');
-  const count = (v) => { if (v === undefined || v === null) return 0; if (!isCount(v)) throw malformed('usage'); return v; };
   return {
     content: msg.content ? [{ type: 'text', text: msg.content }] : [],
     tool_calls,
     stop,
-    usage: { input_tokens: count(u.prompt_tokens), output_tokens: count(u.completion_tokens) },
+    usage: usageOf(json),
     served_by: { provider, model: isStr(json.model) ? json.model : '' },
   };
 }

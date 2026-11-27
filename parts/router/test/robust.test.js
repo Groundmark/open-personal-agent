@@ -194,3 +194,35 @@ test('replay: a broken line doesn\'t hide older recordings; a malformed recordin
   await assert.rejects(run(other), (e) => e.code === 'provider_error' && /malformed/.test(e.message));
   await assert.rejects(run(third), (e) => e.code === 'provider_error' && /malformed/.test(e.message));
 });
+
+test('follow-ups: a misspelt setting is an error; an empty message is bad_request; a reply cut off mid-call is max_tokens', async () => {
+  const d = tmp(); const f = path.join(d, 'r.toml');
+  const base = '[models.default]\nprovider = "openai"\nbase_url = "http://x"\nmodel = "m"\ncredential = "c"\n';
+  for (const [extra, re] of [['timeout_sec = 600\n', /models\.default\.timeout_sec isn't a setting/], ['max_token = 4000\n', /max_token isn't a setting/]]) {
+    fs.writeFileSync(f, base + extra);
+    assert.throws(() => loadConfig(f), re);
+  }
+  fs.writeFileSync(f, '[server]\nprot = 1\n' + base);
+  assert.throws(() => loadConfig(f), /server\.prot isn't a setting/);
+  fs.writeFileSync(f, '[sever]\nport = 1\n' + base);
+  assert.throws(() => loadConfig(f), /sever isn't a setting/);
+  fs.writeFileSync(f, base + 'max_tokens = 4000\ntimeout_s = 600\n');
+  assert.equal(loadConfig(f).models.default.timeout_s, 600);
+
+  for (const role of ['tool', 'assistant', 'user']) {
+    assert.equal((await handle(fixed, env({ model: 'default', messages: [{ role: 'user', content: 'x' }, { role, content: [] }] }))).error, 'bad_request', role);
+  }
+
+  const cut = { model: 'm', choices: [{ message: { content: 'Let me', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{"party_si' } }] }, finish_reason: 'length' }], usage: { prompt_tokens: 5, completion_tokens: 16000 } };
+  const r = fromOpenAI(cut, 'p');
+  assert.equal(r.stop, 'max_tokens');
+  assert.deepEqual(r.tool_calls, []);
+  assert.deepEqual(r.content, [{ type: 'text', text: 'Let me' }]);
+  // Calls that parse are dropped too: the model may not have finished choosing them.
+  const call = (id, args) => ({ id, type: 'function', function: { name: 'f', arguments: args } });
+  for (const calls of [[call('a', '{"x":1}')], [call('a', '{"x":1}'), call('b', '{"x"')]]) {
+    const x = fromOpenAI({ ...cut, choices: [{ message: { content: null, tool_calls: calls }, finish_reason: 'length' }] }, 'p');
+    assert.equal(x.stop, 'max_tokens');
+    assert.deepEqual(x.tool_calls, []);
+  }
+});

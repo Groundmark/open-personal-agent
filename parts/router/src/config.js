@@ -56,9 +56,16 @@ export function loadConfig(file) {
   const t = parseToml(fs.readFileSync(file, 'utf8'));
   const models = t.models || Object.create(null);
   if (!Object.keys(models).length) throw new Error('router.toml: no [models.<name>] tables');
+  // A misspelt setting is an error, not a default quietly applied.
+  const only = (where, obj, keys) => {
+    for (const k of Object.keys(obj)) if (!keys.includes(k)) throw new Error(`router.toml: ${where}${k} isn't a setting here (known: ${keys.join(', ')})`);
+  };
+  only('', t, ['server', 'models']);
+  if (t.server !== undefined) { if (typeof t.server !== 'object') throw new Error('router.toml: server must be a table'); only('server.', t.server, ['port', 'log', 'record']); }
   for (const [name, m] of Object.entries(models)) {
     if (typeof m !== 'object') throw new Error(`router.toml: models.${name} must be a table`);
     if (!['openai', 'replay'].includes(m.provider)) throw new Error(`router.toml: models.${name}.provider must be "openai" or "replay"`);
+    only(`models.${name}.`, m, m.provider === 'openai' ? ['provider', 'base_url', 'model', 'credential', 'max_tokens', 'timeout_s'] : ['provider', 'file']);
     if (m.provider === 'openai' && !(m.base_url && m.model && m.credential)) {
       throw new Error(`router.toml: models.${name} needs base_url, model and credential`);
     }

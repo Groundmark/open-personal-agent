@@ -32,6 +32,7 @@ export function checkArgs(a) {
     if (isStr(m.content)) {
       if (m.role === 'tool') bad('tool messages take a list of tool_result parts');
     } else if (Array.isArray(m.content)) {
+      if (!m.content.length) bad('a message needs at least one part');   // an empty one would vanish or be refused upstream
       for (const p of m.content) checkPart(p, m.role, bad);
     } else bad('message content must be a string or a list of parts');
   }
