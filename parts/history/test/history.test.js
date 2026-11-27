@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { canonicalize } from '../src/jcs.js';
 import { verifyAll, verifyLog, loadKeys } from '../src/logs.js';
 import { errands, pairing, show, describe } from '../src/story.js';
@@ -134,7 +136,17 @@ test('cli: exit codes and --json', () => {
   assert.match(out.pop(), /BROKEN at line 1/);
 });
 
-const fixtures = new URL('../../../fixtures/', import.meta.url).pathname;
+test('cli: run through a symlink (as npm installs the bin) and from a path with a space, it still runs and fails', () => {
+  const d = logs();
+  edit(path.join(d, 'actions.jsonl'), 1, (l) => l.replace('one_shot', 'standing'));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'opa history bin '));
+  fs.symlinkSync(fileURLToPath(new URL('../src/cli.js', import.meta.url)), path.join(bin, 'history'));
+  const r = spawnSync(process.execPath, [path.join(bin, 'history'), '--dir', d, 'verify'], { encoding: 'utf8' });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stdout, /BROKEN at line 1/);
+});
+
+const fixtures = fileURLToPath(new URL('../../../fixtures/', import.meta.url));
 test('the fixture errand\'s real logs verify, and a tampered copy does not', { skip: !fs.existsSync(fixtures + 'node_modules/ajv') && 'run npm ci in fixtures/ first' }, async () => {
   const { runErrand } = await import(fixtures + 'errand/run.js');
   const r = await runErrand();

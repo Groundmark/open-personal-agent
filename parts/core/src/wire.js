@@ -18,6 +18,7 @@ export function call(socket, req, { timeoutMs = 16 * 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     const c = createConnection(socket, () => c.write(JSON.stringify(req) + '\n'));
     let buf = '';
+    c.setEncoding('utf8');   // a character split across two chunks stays whole
     c.setTimeout(timeoutMs, () => c.destroy(new Error(`${req.op}: no answer from ${socket}`)));
     c.on('data', (d) => { buf += d; });
     c.on('error', reject);
@@ -25,9 +26,19 @@ export function call(socket, req, { timeoutMs = 16 * 60_000 } = {}) {
   });
 }
 
+const isText = (p) => p?.type === 'text' && typeof p.text === 'string';
+const isCall = (c) => typeof c?.call_id === 'string' && typeof c.name === 'string' && c.arguments !== null && typeof c.arguments === 'object' && !Array.isArray(c.arguments);
+
+/** One infer call. Never throws: a router that is down, slow or answers nonsense is { ok: false, error: 'router_unavailable' }. */
 export async function infer(url, req) {
-  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req), signal: AbortSignal.timeout(180_000) });
-  return res.json();
+  let r;
+  try {
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req), signal: AbortSignal.timeout(180_000) });
+    r = await res.json();
+  } catch { r = null; }
+  if (r?.ok === true && Array.isArray(r.result?.content) && r.result.content.every(isText) && Array.isArray(r.result.tool_calls) && r.result.tool_calls.every(isCall)) return r;
+  if (r?.ok === false && typeof r.error === 'string') return r;
+  return { id: req.id, ok: false, error: 'router_unavailable' };
 }
 
 /** Serves the core's socket at a path (mode 0660: callers come in by group) or on { fd } from systemd. */
@@ -35,6 +46,7 @@ export async function serve(path, handlers) {
   if (typeof path === 'string' && existsSync(path)) unlinkSync(path);
   const srv = createServer((conn) => {
     let buf = '', done = false;
+    conn.setEncoding('utf8');
     conn.on('error', () => {});
     conn.on('data', async (d) => {
       if (done) return;

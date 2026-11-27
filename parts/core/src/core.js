@@ -14,34 +14,81 @@ const BOOK = { type: 'object', additionalProperties: false, required: ['service'
   party_size: { type: 'integer', minimum: 1 }, notes: { type: 'string', description: 'Anything the restaurant should know' },
 } };
 
+// Durable state, per errand (errands.json, written at checkpoints):
+//   inbox   messages accepted from a channel and not yet answered. Saved before the channel is told "got it".
+//   transcript, grants, asks   the conversation so far, the approvals asked for, the links still to send.
+//   resume  model work is owed (a turn was running). At start the turn is finished, never started twice.
+//   outbox  replies decided but not yet delivered, oldest first. Sent at least once: a crash between the send
+//           and the next checkpoint can repeat a message, but never loses one.
+//   seen    ids of the last 200 messages taken into a turn; with the ids in the inbox, a message sent twice is
+//           answered once. (A repeat of a message older than that would be answered again.)
+// If a checkpoint or the conversation log can't be written, the core stops (onFatal) rather than carry on from
+// state it can't keep; systemd restarts it from the last checkpoint.
+
+const SEEN = 200;
+const RETRY_MS = [5_000, 30_000, 120_000];   // a failed send is retried, then waits for the next event or a restart
+const toolCalls = (m) => (m?.role === 'assistant' && Array.isArray(m.content) ? m.content.filter((p) => p.type === 'tool_call') : []);
+
 export class Core {
   /**
    * services: { <key>: { name, credential, server, book_tool, search_tool? } }: the places the agent can book,
    *   reached by the broker's mcp.call (contracts/broker.md).
    * channels: { <channel name>: <adapter socket path> }.
    */
-  constructor({ stateDir, routerUrl, brokerSocket, channels, services, model = 'default', timezone = 'UTC', idleHours = 6, now = () => new Date() }) {
-    Object.assign(this, { stateDir, routerUrl, brokerSocket, channels, services, model, timezone, idleMs: idleHours * 3600_000, now });
+  constructor({ stateDir, routerUrl, brokerSocket, channels, services, model = 'default', timezone = 'UTC', idleHours = 6, now = () => new Date(),
+    retryMs = RETRY_MS, reconcileRetryMs = 30_000, onFatal = (err) => { console.error(`core: can't keep state, stopping: ${err.message}`); process.exit(70); } }) {
+    Object.assign(this, { stateDir, routerUrl, brokerSocket, channels, services, model, timezone, idleMs: idleHours * 3600_000, now, retryMs, reconcileRetryMs, onFatal });
     this.log = new ConversationLog(join(stateDir, 'conversation.jsonl'));
     this.file = join(stateDir, 'errands.json');
     this.errands = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : {};
+    for (const e of Object.values(this.errands)) {   // state from before these fields existed
+      e.inbox ??= []; e.outbox ??= []; e.seen ??= [];
+      // An approval link saved by the first version, whose reply never went out: a turn is owed to send it.
+      if (typeof e.ask === 'string') { e.asks = [...(e.asks ?? []), e.ask]; delete e.ask; e.resume = true; }
+    }
     // What's on disk is each errand's last checkpoint, not the live state: saving one errand never writes
     // another errand's half-finished step.
     this.committed = structuredClone(this.errands);
     this.queues = new Map();
+    this.retries = new Map();
+    this.dead = false;
+    this.resumed = false;
   }
 
-  /** A checkpoint for one errand: its state now becomes what's on disk for it. */
-  #save(e) {
-    const key = Object.keys(this.errands).find((k) => this.errands[k] === e);
-    if (key) this.committed[key] = structuredClone(e);
-    writeFileSync(this.file + '.tmp', JSON.stringify(this.committed), { mode: 0o600 });
-    renameSync(this.file + '.tmp', this.file);
+  /** Stops everything: no more jobs, no more "got it" to channels. */
+  #fatal(err) {
+    this.dead = true;
+    this.onFatal(err);
+    throw Object.assign(err, { fatal: true });
+  }
+
+  /**
+   * A checkpoint. With an errand, its live state becomes what's on disk for it. Every errand's inbox, seen and
+   * last_active are always saved as they are now (they only change where that's safe), so a message accepted
+   * during another step's checkpoint is never dropped. The new state counts only once it's on disk.
+   */
+  #save(e = null) {
+    const next = { ...this.committed };
+    const key = e && Object.keys(this.errands).find((k) => this.errands[k] === e);
+    if (key) next[key] = structuredClone(e);
+    for (const [k, x] of Object.entries(this.errands)) {
+      if (next[k]?.errand_id === x.errand_id) next[k] = { ...next[k], inbox: structuredClone(x.inbox), seen: [...x.seen], last_active: x.last_active };
+    }
+    try {
+      writeFileSync(this.file + '.tmp', JSON.stringify(next), { mode: 0o600 });
+      renameSync(this.file + '.tmp', this.file);
+    } catch (err) { this.#fatal(err); }
+    this.committed = next;
+  }
+
+  #append(entry) {
+    try { this.log.append(entry); } catch (err) { this.#fatal(err); }
   }
 
   /** One thing at a time per errand, in arrival order. */
   #queue(key, fn) {
-    const p = (this.queues.get(key) ?? Promise.resolve()).then(fn).catch((e) => console.error(`core: errand ${key}: ${e.stack || e}`));
+    const p = (this.queues.get(key) ?? Promise.resolve()).then(() => (this.dead ? undefined : fn()))
+      .catch((err) => console.error(`core: errand ${key}: ${err.stack || err}`));
     this.queues.set(key, p);
     return p;
   }
@@ -49,12 +96,14 @@ export class Core {
   handlers() {
     return {
       'channel.inbound': async (a) => {
+        if (this.dead) throw Object.assign(new Error('core is stopping'), { code: 'unavailable' });
         if (!this.channels[a.channel]) throw Object.assign(new Error(`no channel ${a.channel}`), { code: 'bad_request' });
         const key = `${a.channel}:${a.from}`;
-        this.#queue(key, () => this.#inbound(key, a));
+        if (this.#accept(key, a)) this.#queue(key, () => this.#nextInbound(key));
         return {};
       },
       'grant.event': async ({ grant_id, state }) => {
+        if (this.dead) throw Object.assign(new Error('core is stopping'), { code: 'unavailable' });
         const key = Object.keys(this.errands).find((k) => this.errands[k].grants?.[grant_id]);
         if (key) this.#queue(key, () => this.#grantEvent(key, grant_id, state));
         return {};
@@ -62,34 +111,72 @@ export class Core {
     };
   }
 
-  /** At start: ask the broker about requests still marked pending here, in case a decision was missed. */
-  async reconcile() {
+  /** Nothing owed and nothing waiting: a new message after the idle time starts a new errand. */
+  #finished(e) {
+    return !e.resume && !e.inbox.length && !e.outbox.length && !e.asks?.length && !Object.values(e.grants ?? {}).some((g) => g.state === 'pending');
+  }
+
+  /** Records an arriving message and saves it, before the channel hears "got it". Synchronous. False if it's a repeat. */
+  #accept(key, a) {
+    let e = this.errands[key];
+    if (a.message_id && (e?.seen.includes(a.message_id) || e?.inbox.some((m) => m.message_id === a.message_id))) return false;   // sent twice: already taken
+    if (!e || (this.now() - Date.parse(e.last_active) > this.idleMs && this.#finished(e))) {
+      e = this.errands[key] = { errand_id: ulid(), channel: a.channel, to: a.from, transcript: [], grants: {}, inbox: [], outbox: [], seen: e?.seen ?? [], last_active: null };
+      this.#save(e);
+    }
+    e.last_active = this.now().toISOString();
+    this.#append({ errand_id: e.errand_id, type: 'message', direction: 'in', channel: a.channel, message_id: a.message_id, text: a.text, attachments: a.attachments ?? [] });
+    e.inbox.push({ text: a.text, message_id: a.message_id ?? null });
+    this.#save();
+    return true;
+  }
+
+  /**
+   * At start, before the socket opens: queue what a crash interrupted, ahead of anything new. Each job looks at
+   * the errand's state when it runs, so nothing is done twice.
+   */
+  resume() {
+    if (this.resumed) return;
+    this.resumed = true;
     for (const [key, e] of Object.entries(this.errands)) {
-      if (e.resume) {   // a turn that a crash interrupted
-        // A tool call saved without its result: its outcome is unknown, and the model is told so before going on.
-        const last = e.transcript.at(-1);
-        const open = last?.role === 'assistant' && Array.isArray(last.content) ? last.content.filter((p) => p.type === 'tool_call') : [];
-        if (open.length) e.transcript.push({ role: 'tool', content: open.map((c) => ({ type: 'tool_result', call_id: c.call_id, is_error: true,
-          content: { error: 'interrupted', message: 'This step was interrupted by a restart; its outcome is unknown.' } })) });
-        this.#queue(key, () => this.#turn(e));
-      }
+      if (e.resume) {
+        this.#queue(key, async () => {
+          if (!e.resume) return;
+          this.#closeCalls(e, 'interrupted', 'This step was interrupted by a restart; its outcome is unknown.');
+          this.#save(e);
+          await this.#turn(e);
+        });
+      } else if (e.outbox.length) this.#queue(key, () => this.#flush(key));
+      for (let i = 0; i < e.inbox.length; i++) this.#queue(key, () => this.#nextInbound(key));
+    }
+  }
+
+  /** At start: resume, then ask the broker about requests still marked pending here, in case a decision was missed. */
+  async reconcile() {
+    this.resume();
+    let unreachable = false;
+    for (const [key, e] of Object.entries(this.errands)) {
       for (const [id, g] of Object.entries(e.grants ?? {})) {
         if (g.state !== 'pending') continue;
-        let st; try { st = await this.#broker(e, 'grant.status', { grant_id: id }); } catch { continue; }
+        let st;
+        try { st = await this.#broker(e, 'grant.status', { grant_id: id }); } catch (err) { if (!/^[a-z_]+$/.test(err.code ?? '')) unreachable = true; continue; }   // a broker error has a contract code; anything else is the transport
         const state = st.state === 'consumed' ? 'approved' : st.state;
         if (['approved', 'denied', 'expired'].includes(state)) this.#queue(key, () => this.#grantEvent(key, id, state));
       }
     }
+    // The broker may not be up yet: try again until it answers, so a decision made while we were down isn't missed.
+    if (unreachable && !this.dead) setTimeout(() => this.reconcile().catch((err) => console.error('core: reconcile failed:', err.message)), this.reconcileRetryMs).unref();
   }
 
-  async #inbound(key, a) {
-    let e = this.errands[key];
-    if (!e || this.now() - Date.parse(e.last_active) > this.idleMs) {
-      e = this.errands[key] = { errand_id: ulid(), channel: a.channel, to: a.from, transcript: [], grants: {}, last_active: null };
-    }
-    e.last_active = this.now().toISOString();
-    this.log.append({ errand_id: e.errand_id, type: 'message', direction: 'in', channel: a.channel, message_id: a.message_id, text: a.text, attachments: a.attachments ?? [] });
-    e.transcript.push({ role: 'user', content: a.text });
+  async #nextInbound(key) {
+    const e = this.errands[key];
+    const m = e.inbox[0];
+    if (!m) return;
+    e.inbox.shift();
+    if (m.message_id) e.seen = [...e.seen, m.message_id].slice(-SEEN);   // only ever evicts messages already answered
+    e.transcript.push({ role: 'user', content: m.text });
+    e.resume = true;
+    this.#save(e);   // the message is now the turn's, and the turn is owed
     await this.#turn(e);
   }
 
@@ -101,43 +188,106 @@ export class Core {
     e.transcript.push({ role: 'user', content: `(Note from the agent's own system, not the person: the person ${said} this request: "${g.summary}".`
       + `${state === 'approved' && g.kind === 'book' ? ' You can now call complete_booking.' : ''})` });
     // The decision, the note and "a turn is owed" are saved together before the model runs, so a crash anywhere
-    // after this is picked up at start (reconcile) rather than lost.
+    // after this is picked up at start (resume) rather than lost.
     e.resume = true;
     this.#save(e);
     await this.#turn(e);
   }
 
-  /** Ask the model, run its tools, repeat until it answers; then send the answer. */
-  async #turn(e) {
-    let text = '';
-    for (let step = 0; step < MAX_STEPS; step++) {
-      const r = await infer(this.routerUrl, envelope('infer', e.errand_id, { model: this.model, system: this.#system(), messages: e.transcript.slice(-KEEP), tools: this.#tools() }));
-      if (!r.ok) { text = `Sorry, I couldn't think that through just now (${r.error}). Please try again in a moment.`; break; }
-      const { content, tool_calls: calls, stop } = r.result;
-      text = content.map((p) => p.text).join('\n').trim();
-      e.transcript.push({ role: 'assistant', content: [...content, ...calls.map((c) => ({ type: 'tool_call', ...c }))] });
-      if (!calls.length) { if (stop === 'refused') text ||= "Sorry, I can't help with that."; break; }
-      const results = [];
-      for (const c of calls) {
-        let out;
-        try { out = await this.#tool(e, c.name, c.arguments ?? {}); } catch (err) { out = { error: err.code ?? 'failed', message: err.message }; }
-        results.push({ type: 'tool_result', call_id: c.call_id, content: out, ...(out?.error ? { is_error: true } : {}) });
-      }
-      e.transcript.push({ role: 'tool', content: results });
-      this.#save(e);   // what the tools did (a booking, say) is kept, with their results, before the model runs again
-      if (step === MAX_STEPS - 1) text = 'Sorry, I got stuck on that. Could you say it another way?';
-    }
-    // An approval asked for in this turn goes out with the agent's words, as one message.
-    const ask = e.ask; delete e.ask;
-    if (text || ask) await this.#say(e, [text, ask].filter(Boolean).join('\n\n'));
-    delete e.resume;
-    this.#save(e);
+  /** Gives every tool call in the last step that has no result an error result, so the transcript stays whole. */
+  #closeCalls(e, error, message) {
+    const t = e.transcript;
+    const i = t.findLastIndex((m) => m.role === 'assistant');
+    if (i < t.length - 2) return;
+    const calls = toolCalls(t[i]);
+    if (!calls.length) return;
+    let results = t[i + 1];
+    if (!results) t.push(results = { role: 'tool', content: [] });
+    const have = new Set(results.content.map((p) => p.call_id));
+    for (const c of calls) if (!have.has(c.call_id)) results.content.push({ type: 'tool_result', call_id: c.call_id, is_error: true, content: { error, message } });
   }
 
-  async #say(e, text) {
-    const r = await call(this.channels[e.channel], envelope('channel.send', e.errand_id, { channel: e.channel, to: e.to, text, attachments: [] }));
-    if (!r.ok) { console.error(`core: channel.send failed: ${r.error}`); return; }
-    this.log.append({ errand_id: e.errand_id, type: 'message', direction: 'out', channel: e.channel, message_id: r.result.message_id, text, attachments: [] });
+  /** What the model sees: the last KEEP messages, widened back to the user message that starts that turn. */
+  #window(e) {
+    const t = e.transcript;
+    let i = Math.max(0, t.length - KEEP);
+    while (i > 0 && t[i].role !== 'user') i--;
+    return t.slice(i);
+  }
+
+  /** Ask the model, run its tools, repeat until it answers; then queue the answer and send it. */
+  async #turn(e) {
+    await this.#flush(this.#keyOf(e));   // a reply already owed goes before this turn's thinking
+    let text;
+    try { text = await this.#think(e); } catch (err) {
+      if (err.fatal) throw err;
+      console.error(`core: errand ${e.errand_id}: turn failed: ${err.stack || err}`);
+      this.#closeCalls(e, 'failed', 'This step failed; its outcome is unknown.');
+      text = "Sorry, something went wrong on my side, so I can't tell whether that worked. Please check before trying again.";
+    }
+    // The approvals asked for in this turn go out with the agent's words, as one message.
+    const msg = [text, ...(e.asks ?? [])].filter(Boolean).join('\n\n');
+    delete e.asks;
+    if (msg) e.outbox.push(msg);
+    delete e.resume;
+    this.#save(e);   // the reply is decided: from here it's owed until sent
+    await this.#flush(this.#keyOf(e));
+  }
+
+  async #think(e) {
+    for (let step = 0; step < MAX_STEPS; step++) {
+      const r = await infer(this.routerUrl, envelope('infer', e.errand_id, { model: this.model, system: this.#system(), messages: this.#window(e), tools: this.#tools() }));
+      if (!r.ok) return `Sorry, I couldn't think that through just now (${r.error}). Please try again in a moment.`;
+      const { content, tool_calls: calls, stop } = r.result;
+      const text = content.map((p) => p.text).join('\n').trim();
+      e.transcript.push({ role: 'assistant', content: [...content, ...calls.map((c) => ({ type: 'tool_call', ...c }))] });
+      if (!calls.length) {
+        return stop === 'refused' ? text || "Sorry, I can't help with that." : text;
+      }
+      const results = { role: 'tool', content: [] };
+      e.transcript.push(results);
+      if (step === MAX_STEPS - 1) {
+        // Out of steps: what the model asked for now is not done, since it would never see the outcome to report it.
+        for (const c of calls) results.content.push({ type: 'tool_result', call_id: c.call_id, is_error: true, content: { error: 'not_run', message: 'Too many steps in one turn; this was not done.' } });
+        this.#save(e);
+        return "Sorry, I got stuck on that and stopped before doing the last thing I was about to do. Could you say it another way?";
+      }
+      this.#save(e);   // the calls are saved before they run, so a crash mid-call is known to be one
+      for (const c of calls) {
+        let out;
+        try { out = await this.#tool(e, c.name, c.arguments ?? {}); } catch (err) {
+          if (err.fatal) throw err;
+          out = { error: err.code ?? 'failed', message: err.message };
+        }
+        results.content.push({ type: 'tool_result', call_id: c.call_id, content: out, ...(out?.error ? { is_error: true } : {}) });
+        this.#save(e);   // each result (a booking, say) is kept as soon as it's known
+      }
+    }
+  }
+
+  #keyOf(e) { return Object.keys(this.errands).find((k) => this.errands[k] === e); }
+
+  /** Sends what's owed, oldest first, stopping at the first failure (retried later). */
+  async #flush(key) {
+    const e = this.errands[key];
+    while (e?.outbox.length) {
+      const text = e.outbox[0];
+      let r;
+      try { r = await call(this.channels[e.channel], envelope('channel.send', e.errand_id, { channel: e.channel, to: e.to, text, attachments: [] })); } catch (err) { r = { ok: false, error: err.message }; }
+      if (!r?.ok) {
+        console.error(`core: channel.send failed: ${r?.error}`);
+        const n = this.retries.get(key) ?? 0;
+        if (n < this.retryMs.length && !this.dead) {
+          this.retries.set(key, n + 1);
+          setTimeout(() => this.#queue(key, () => this.#flush(key)), this.retryMs[n]).unref();
+        }
+        return;
+      }
+      this.retries.delete(key);
+      e.outbox.shift();
+      this.#append({ errand_id: e.errand_id, type: 'message', direction: 'out', channel: e.channel, message_id: r.result?.message_id ?? null, text, attachments: [] });
+      this.#save(e);
+    }
   }
 
   async #broker(e, op, args) {
@@ -175,7 +325,7 @@ How bookings work: when the person wants a table and you know the place, date, t
       const constraints = { venue: s.name, date: a.date, time: a.time, party_size: a.party_size, ...(a.notes ? { notes: a.notes } : {}) };
       const g = await this.#broker(e, 'grant.request', { credential: s.credential, ops: ['book'], constraints, mode: 'one_shot', ttl_seconds: 1800, purpose: `Book a table at ${s.name}` });
       e.grants[g.grant_id] = { kind: 'book', state: 'pending', service: a.service, constraints, summary: g.summary };
-      e.ask = `${g.summary}\nApprove: ${g.approve_url}`;
+      (e.asks ??= []).push(`${g.summary}\nApprove: ${g.approve_url}`);
       return { status: 'waiting_for_approval', summary: g.summary, note: 'The approval request goes to the person with your reply. Say in one short sentence that it needs their approval; don\'t repeat the details.' };
     }
     if (name === 'complete_booking') {
@@ -200,7 +350,7 @@ How bookings work: when the person wants a table and you know the place, date, t
       if (!id) {
         const g = await this.#broker(e, 'grant.request', { credential: s.credential, ops: ['search'], mode: 'standing', ttl_seconds: 7 * 24 * 3600, purpose: `Check availability at ${s.name}` });
         e.grants[g.grant_id] = { kind: 'search', state: 'pending', service: a.service, summary: g.summary };
-        e.ask = `${g.summary}\nApprove: ${g.approve_url}`;
+        (e.asks ??= []).push(`${g.summary}\nApprove: ${g.approve_url}`);
         return { status: 'waiting_for_approval', note: 'The approval request goes to the person with your reply. Say in one short sentence that you need their OK to check availability.' };
       }
       return (await this.#broker(e, 'mcp.call', { grant_id: id, server: s.server, tool: s.search_tool, arguments: a })).content;

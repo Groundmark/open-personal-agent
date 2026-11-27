@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Core } from '../src/core.js';
 import { serve } from '../src/wire.js';
 
-const fixtures = new URL('../../../fixtures/', import.meta.url).pathname;
+const fixtures = fileURLToPath(new URL('../../../fixtures/', import.meta.url));
 const ready = fs.existsSync(fixtures + 'node_modules/ajv');
 const SCRIPT = [
   { when: 'Book a table', tool_calls: [{ name: 'request_booking', arguments: { service: 'casa-verde', date: '2026-12-04', time: '19:00', party_size: 2 } }] },
@@ -53,7 +54,7 @@ test('a booking end to end: request, approval, booking, reply; logs verify', { s
     const actions = fs.readFileSync(path.join(w.dir, 'actions.jsonl'), 'utf8');
     assert.match(actions, /"op":"book".*"status":"ok"/);
     assert.match(actions, /"type":"identity.declaration"/);
-    const { verifyLog } = await import(new URL('../../history/src/logs.js', import.meta.url).pathname);
+    const { verifyLog } = await import(new URL('../../history/src/logs.js', import.meta.url));
     // The core logs a message just after sending it: wait for the line rather than racing it.
     await until(() => fs.readFileSync(path.join(w.dir, 'conversation.jsonl'), 'utf8').split('\n').filter(Boolean).length >= 3);
     const v = verifyLog(path.join(w.dir, 'conversation.jsonl'), 'conversation');

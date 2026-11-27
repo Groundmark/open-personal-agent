@@ -2,7 +2,9 @@
 // history [--dir <dir>] [--keys <keys.json>] [--json] verify | show <errand_id> | errands | pairing
 // <dir> holds actions.jsonl, context-reads.jsonl and conversation.jsonl (default $OPA_HISTORY_DIR, else .).
 // keys.json maps "broker" and "context" to their public keys (PEM or JWK); default <dir>/keys.json.
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadKeys, verifyAll } from './logs.js';
 import { describe, errands, pairing, show } from './story.js';
 
@@ -44,4 +46,6 @@ export function run(argv, out = console.log) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exitCode = run(process.argv.slice(2));
+// Run as a program (also through an npm bin symlink, or from a path with spaces), not when imported.
+const isMain = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+if (process.argv[1] && isMain()) process.exitCode = run(process.argv.slice(2));
