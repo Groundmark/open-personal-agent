@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { RouterError } from '../errors.js';
+import { isResult } from '../check.js';
 
 const canonical = (v) => (v === null || typeof v !== 'object' ? JSON.stringify(v)
   : Array.isArray(v) ? `[${v.map(canonical).join(',')}]`
@@ -19,19 +20,27 @@ export function replayAdapter(cfg) {
     const k = requestKey(args);
     let lines = [];
     try { lines = fs.readFileSync(cfg.file, 'utf8').split('\n').filter(Boolean); } catch {}
-    for (const l of lines.reverse()) {
-      const r = JSON.parse(l);
-      if (r.key === k) return { ...r.result, served_by: { provider: 'replay', model: r.result.served_by?.model || '' } };
+    for (const [i, l] of [...lines.entries()].reverse()) {   // newest first
+      let r;
+      try { r = JSON.parse(l); } catch { console.error(`router: ${cfg.file} line ${i + 1} is not JSON, skipped`); continue; }
+      if (r?.key !== k) continue;
+      if (!isResult(r.result)) throw new RouterError('provider_error', `the recording for request ${k.slice(0, 12)} is malformed`);
+      return { ...r.result, served_by: { provider: 'replay', model: typeof r.result.served_by?.model === 'string' ? r.result.served_by.model : '' } };
     }
     throw new RouterError('provider_error', `no recording for request ${k.slice(0, 12)}`);
   };
 }
 
-/** Wraps an adapter so every successful answer is appended to `file`. */
+/** Wraps an adapter so every successful answer is appended to `file`. Best effort: an answer already
+ * paid for goes back to the caller even if it can't be saved. */
 export function recording(adapter, file) {
   return async (args) => {
     const result = await adapter(args);
-    fs.appendFileSync(file, JSON.stringify({ key: requestKey(args), result }) + '\n', { mode: 0o600 });
+    try {
+      fs.appendFileSync(file, JSON.stringify({ key: requestKey(args), result }) + '\n', { mode: 0o600 });
+    } catch (e) {
+      console.error(`router: can't write the recording to ${file}: ${e.code || 'error'}`);
+    }
     return result;
   };
 }

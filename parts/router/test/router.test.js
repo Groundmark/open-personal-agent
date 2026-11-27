@@ -32,7 +32,7 @@ const key = () => KEY;
 
 test('toml subset: tables, strings, numbers, booleans, comments; rejects the rest', () => {
   const t = parseToml('# c\n[server]\nport = 8411 # trailing\n[models.default]\nprovider = "openai"\nx = true\n');
-  assert.deepEqual(t, { server: { port: 8411 }, models: { default: { provider: 'openai', x: true } } });
+  assert.deepEqual(JSON.parse(JSON.stringify(t)), { server: { port: 8411 }, models: { default: { provider: 'openai', x: true } } });
   assert.throws(() => parseToml('a = [1]'), /unsupported value/);
   assert.throws(() => parseToml('nonsense'), /can't read/);
 });
@@ -56,7 +56,9 @@ test('translation to chat completions: system, tool calls and tool results', () 
     tools: [{ name: 'find_table', description: 'Find', parameters: { type: 'object' } }],
   }, 'up/model-1');
   assert.equal(body.model, 'up/model-1');
-  assert.equal(body.max_tokens, 16000);
+  assert.equal('max_tokens' in body, false);   // no default of the router's own
+  assert.equal(toOpenAI({ messages: [{ role: 'user', content: 'x' }] }, 'm', { max_tokens: 900 }).max_tokens, 900);
+  assert.equal(toOpenAI({ messages: [{ role: 'user', content: 'x' }], max_tokens: 50 }, 'm', { max_tokens: 900 }).max_tokens, 50);
   assert.deepEqual(body.messages[0], { role: 'system', content: 'You book tables.' });
   assert.deepEqual(body.messages[2].tool_calls, [{ id: 'c1', type: 'function', function: { name: 'find_table', arguments: '{"party_size":2}' } }]);
   assert.deepEqual(body.messages[3], { role: 'tool', tool_call_id: 'c1', content: '{"ok":true}' });
@@ -72,7 +74,7 @@ test('translation back: stop reasons, tool arguments, usage', () => {
   assert.equal(fromOpenAI(completion({ content: 'hi' }, 'length'), 'p').stop, 'max_tokens');
   assert.equal(fromOpenAI(completion({ content: '' }, 'content_filter'), 'p').stop, 'refused');
   assert.equal(fromOpenAI({ ...completion({ content: '' }), choices: [{ message: {}, finish_reason: 'stop', native_finish_reason: 'refusal' }] }, 'p').stop, 'refused');
-  assert.throws(() => fromOpenAI(completion({ tool_calls: [{ id: 'x', function: { name: 'f', arguments: '{oops' } }] }, 'tool_calls'), 'p'), /malformed arguments/);
+  assert.throws(() => fromOpenAI(completion({ tool_calls: [{ id: 'x', function: { name: 'f', arguments: '{oops' } }] }, 'tool_calls'), 'p'), /arguments are not a JSON object/);
 });
 
 test('envelope errors: bad_request, unknown_op, unknown_model', async () => {
@@ -116,7 +118,7 @@ test('provider errors map to the contract: 429, context too long, OpenRouter 200
   assert.equal((await ask(a)).error, 'context_too_long');
   const e = await ask(a);
   assert.equal(e.error, 'provider_error');
-  assert.match(e.message, /502: upstream failed/);
+  assert.equal(e.message, 'provider returned 502');   // fixed text: the provider's own words can quote the prompt
   await up.close();
   assert.equal((await ask(mk(up.url))).error, 'provider_error');
   const { credentialReader } = await import('../src/credentials.js');

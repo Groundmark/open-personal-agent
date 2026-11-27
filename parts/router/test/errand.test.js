@@ -4,13 +4,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { buildAdapters, startServer } from '../src/server.js';
 
-const fixtures = new URL('../../../fixtures/', import.meta.url).pathname;
+const fixtures = fileURLToPath(new URL('../../../fixtures/', import.meta.url));
 const ready = fs.existsSync(fixtures + 'node_modules/ajv');
 
 test('fixture errand passes with the real router (replayed Haiku 5.5)', { skip: !ready && 'run npm ci in fixtures/ first' }, async () => {
-  const cfg = { port: 0, log: null, record: null, models: { default: { provider: 'replay', file: new URL('errand-haiku-5.5.jsonl', import.meta.url).pathname } } };
+  const cfg = { port: 0, log: null, record: null, models: { default: { provider: 'replay', file: fileURLToPath(new URL('errand-haiku-5.5.jsonl', import.meta.url)) } } };
   const router = await startServer(cfg, buildAdapters(cfg));
   process.env.OPA_ROUTER_URL = router.url;
   try {
