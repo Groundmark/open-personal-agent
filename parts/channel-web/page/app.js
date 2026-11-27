@@ -8,10 +8,11 @@
   const KEY = 'opa-chat-v1';
   const APPROVE = /\n*Approve: https?:\/\/[^\s/]+(\/(?:approve\/[0-9A-HJKMNP-TV-Z]{26}|a\/[0-9A-HJKMNP-TV-Z]{10}))\s*$/;
 
-  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || { msgs: [], cards: {}, seq: 0 }; } catch { return { msgs: [], cards: {}, seq: 0 }; } };
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || { msgs: [], cards: {} }; } catch { return { msgs: [], cards: {} }; } };
   const CLIENT = Math.random().toString(36).slice(2);   // this page, so its own messages coming back aren't shown twice
   const state = load();
-  const save = () => { try { state.msgs = state.msgs.slice(-300); localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
+  let stopped = false;   // signed out (here or in another tab): nothing more is saved
+  const save = () => { if (stopped) return; try { state.msgs = state.msgs.slice(-300); localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
 
   const b64u = { enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
     dec: (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)) };
@@ -94,6 +95,21 @@
 
   function add(who, text) { const m = { who, text, at: Date.now() }; state.msgs.push(m); save(); render(m); }
 
+  // A message being sent is only on screen until the server says what it took. Then the server's text is saved (for a
+  // one-time code, a placeholder: the code is never saved here). If sending fails, nothing of it is saved.
+  const pending = new Map();   // client id -> { el, notice } on screen, until the server confirms what it took
+  let sent = 0;
+  function settle(id, display) {
+    const p = pending.get(id);
+    if (!p || typeof display !== 'string') return;
+    pending.delete(id);
+    p.el.textContent = display;
+    p.el.classList.remove('failed');
+    p.notice?.remove();   // it did get through after all
+    state.msgs.push({ who: 'me', text: display, at: Date.now() });
+    save();
+  }
+
   // ---- signing in, sending, receiving ----
 
   // Notifications: offered once signed in, where the browser can do them. On iPhone, only once the chat is on the Home Screen.
@@ -120,37 +136,68 @@
     };
   }
 
+  // Telling the server this page is in view, and what it has shown, so a notification goes only when it's needed.
+  let here = null;
+  const tellHere = (away = false) => fetch('/api/here', { method: 'POST', headers: { 'content-type': 'application/json' }, keepalive: away,
+    body: JSON.stringify({ page: CLIENT, cursor: state.cursor || '', ...(away ? { away: true } : {}) }) }).catch(() => {});
+  const shown = () => { clearTimeout(here); here = setTimeout(() => { if (document.visibilityState === 'visible') tellHere(); }, 300); };
+
+  let es = null;
   function start(me = {}) {
     offerPush(me.push).catch(() => {});
-    $('signin').hidden = true; composer.hidden = false; $('signout').hidden = false; $('password').hidden = !state.passwordSignin;
+    $('signin').hidden = true; composer.hidden = false; $('signout').hidden = false;
+    $('password').hidden = !state.passwordSignin || me.how !== 'passkey';   // only the passkey can set or change it
     log.replaceChildren(); state.msgs.forEach(render);
-    const es = new EventSource(`/api/events?after=${state.seq || 0}`);
+    es = new EventSource(`/api/events?after=${encodeURIComponent(state.cursor || '')}`);
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data);
-      state.seq = ev.seq;   // where to pick up next time (numbering restarts if the server does; the check below covers that)
+      state.cursor = ev.id;   // where to pick up next time; after a server restart it sends everything, and this skips what's shown
       const key = ev.message_id || `${ev.client}|${ev.at}`;
       state.seen = (state.seen || []).slice(-300);
-      if (state.seen.includes(key)) return save();
+      if (state.seen.includes(key)) { save(); return shown(); }
       state.seen.push(key);
-      if (ev.who === 'me' && ev.client === CLIENT) return save();
+      if (ev.who === 'me' && pending.has(ev.client)) { settle(ev.client, ev.text); return shown(); }
+      if (ev.who === 'me' && ev.client?.startsWith(`${CLIENT}:`)) { save(); return shown(); }
       if (ev.who === 'them') setTyping(false);
       add(ev.who, ev.text);
+      shown();
     };
     es.onerror = () => { if (es.readyState === EventSource.CLOSED) setTimeout(() => location.reload(), 3000); };
+    if (document.visibilityState === 'visible') tellHere();
+    setInterval(() => { if (document.visibilityState === 'visible') tellHere(); }, 20_000);
+    document.addEventListener('visibilitychange', () => tellHere(document.visibilityState !== 'visible'));
     text.focus();
   }
+  // Signed out in another tab: forget everything here too.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== KEY || e.newValue !== null) return;
+    stopped = true; es?.close(); state.msgs = []; log.replaceChildren(); location.reload();
+  });
 
   composer.addEventListener('submit', async (e) => {
     e.preventDefault();
     const t = text.value.trim();
     if (!t) return;
     text.value = ''; text.style.height = '';
-    add('me', t);
+    const id = `${CLIENT}:${++sent}`;
+    const el = document.createElement('div'); el.className = 'msg me'; el.textContent = t; log.append(el); log.scrollTop = log.scrollHeight;
+    pending.set(id, { el });
     setTyping(true);
-    try { await api('/api/send', { text: t, client: CLIENT }); } catch (err) {
+    try {
+      const r = await api('/api/send', { text: t, client: id });
+      if (typeof r.display !== 'string') throw new Error('no answer');   // an unreadable answer: nothing is saved
+      settle(id, r.display);
+      if (r.code && r.code !== 'delivered') setTyping(false);
+      if (r.agent === 'unavailable') { setTyping(false); add('them', "(Your agent couldn't be told just now. Tell it when it's back.)"); }
+    } catch (err) {
       setTyping(false);
       if (err.status === 401) return location.reload();
-      add('them', `(Couldn't reach your agent: ${err.message}. Try again in a moment.)`);
+      const p = pending.get(id);
+      if (!p) return;   // its echo already confirmed it got through
+      // Kept pending: if the server did take it, its echo still settles it. The notice is only on screen.
+      el.classList.add('failed');
+      p.notice = Object.assign(document.createElement('div'), { className: 'msg them', textContent: `(Couldn't reach your agent: ${err.message}. Try again in a moment.)` });
+      log.append(p.notice); log.scrollTop = log.scrollHeight;
     }
   });
   text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); composer.requestSubmit(); } });
@@ -158,7 +205,7 @@
 
   $('signin-go').addEventListener('click', async () => {
     const s = $('signin-status'); $('signin-go').disabled = true; s.textContent = 'Waiting for your passkey…';
-    try { await api('/api/signin', await passkey(await api('/api/signin/options', {}))); start(); }
+    try { await api('/api/signin', await passkey(await api('/api/signin/options', {}))); start(await api('/api/me')); }
     catch (e) { s.textContent = e.name === 'NotAllowedError' ? 'Cancelled. On a computer, choose "use a phone" to sign in with your phone, or use your password.' : `Couldn't sign in: ${e.message}`; $('signin-go').disabled = false; }
   });
   // Password fields: the eye shows or hides the password, keeping focus in the field.
@@ -175,7 +222,7 @@
   $('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const s = $('signin-status'); s.textContent = 'Signing in…';
-    try { await api('/api/signin/password', { password: $('pw').value }); $('pw').value = ''; s.textContent = ''; start(); }
+    try { await api('/api/signin/password', { password: $('pw').value }); $('pw').value = ''; s.textContent = ''; start(await api('/api/me')); }
     catch (err) { s.textContent = err.message; }
   });
   $('password').addEventListener('click', () => { $('set-pw-status').textContent = ''; $('pw-dialog').showModal(); });
@@ -185,7 +232,12 @@
     try { await api('/api/password', { password: $('new-pw').value }); $('new-pw').value = ''; $('pw-dialog').close(); add('them', '(Password saved. You can sign in with it on your computer.)'); }
     catch (err) { $('set-pw-status').textContent = err.message; }
   });
-  $('signout').addEventListener('click', async () => { await api('/api/signout', {}).catch(() => {}); location.reload(); });
+  $('signout').addEventListener('click', async () => {
+    await api('/api/signout', {}).catch(() => {});
+    stopped = true; es?.close();
+    try { localStorage.removeItem(KEY); } catch {}   // this device's copy of the conversation goes too (a shared computer)
+    location.reload();
+  });
 
   api('/api/me').then((r) => {
     state.passwordSignin = Boolean(r.password_signin);
