@@ -29,7 +29,7 @@ Set an environment variable and the errand uses the real part instead of its fix
 | Variable | Part |
 |---|---|
 | `OPA_ROUTER_URL` | `parts/router`: e.g. `http://127.0.0.1:8411/infer` |
-| `OPA_BROKER_MODULE` | `parts/broker`: the path to `parts/broker/src/broker.js`. The fixture store, browser worker and MCP server are plugged into it, and approvals stand in for the passkey |
+| `OPA_BROKER_MODULE` | `parts/broker`: the path to `parts/broker/src/broker.js` (relative to where you run the command, or absolute). The fixture store, browser worker and MCP server are plugged into it, and approvals stand in for the passkey |
 
 The fake restaurant's confirmation numbers are derived from the booking, not random, so the same errand gives the same pages every run and a recorded model run replays exactly.
 

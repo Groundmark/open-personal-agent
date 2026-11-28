@@ -68,6 +68,7 @@ test('a store that asks on the person\'s computer needs them there', () => withE
 
 test('a refusal on the store\'s prompt is not_found, logged, and never retried; no answer is its own error', () => withEnv(async (env) => {
   // Sessions are opened through the broker first: a broker may refuse browser calls on sessions it didn't open.
+  env.store.setOrigin('item-table', env.site.origin);   // so a login matches, and only the refusal can stop it
   env.store.prompt.refuse.add('127.0.0.1');
   const g = await approved(env, { ...LOGIN, credential: { domain: '127.0.0.1' }, operator_present: true });
   const { result: { session_id } } = await B(env, 'browser.open', { grant_id: g.grant_id, url: env.site.origin + '/login' });

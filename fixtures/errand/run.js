@@ -19,6 +19,7 @@ import { ContextFixture } from '../context/context.js';
 import { TerminalChannel } from '../channel/terminal.js';
 import { startRouter, infer } from '../router/router.js';
 import { verifyAll, show } from '../history/history.js';
+import { pathToFileURL } from 'node:url';
 
 const SCHEMA_FILE = (op) =>
   op === 'infer' ? 'router.schema.json'
@@ -69,20 +70,30 @@ export const SCRIPT = [
  * for the passkey. It exposes the handles the tests use (autoApprove, approve, worker, keys, listen).
  */
 async function realBroker(modulePath, { dir, store, onGrantEvent }) {
-  const { Broker } = await import(modulePath);
-  const { listen } = await import(new URL('sockets.js', 'file://' + path.resolve(modulePath)).href);
+  const abs = path.resolve(modulePath);   // relative to where you run it, like any path on the command line
+  const { Broker } = await import(pathToFileURL(abs).href);
+  const { listen } = await import(new URL('sockets.js', pathToFileURL(abs)).href);
   const h = { autoApprove: true };
   const worker = new BrowserWorker({ store, mode: 'agent_browser', getBookGrant: (id) => b.usableBookGrant(id) });
   const b = new Broker({
     stateDir: dir, store, worker, mcp: FAKE_MCP, operator: 'fixture-operator.example', onGrantEvent,
     approvals: { url: (g) => {
-      if (h.autoApprove) setTimeout(() => b.decide(g.grant_id, true, { passkey_credential_id: 'fixture-passkey' }), 20);
+      if (h.autoApprove) setTimeout(() => { try { decide(g.grant_id, true); } catch {} }, 20);   // never takes the run down
       return `http://127.0.0.1/approve/${g.grant_id}`;
     } },
   });
+  // Like the fixture broker: a grant that's no longer pending (denied, revoked, or the run stopping) is left alone.
+  const decide = (id, ok) => { try { return b.decide(id, ok, { passkey_credential_id: 'fixture-passkey' }); } catch (e) { if (!/already/.test(e.message)) throw e; } };
   return Object.assign(h, { worker, real: b, brokerKey: b.brokerKey, agentKey: b.agentKey,
-    approve: (id, ok = true) => b.decide(id, ok, { passkey_credential_id: 'fixture-passkey' }),
+    approve: (id, ok = true) => decide(id, ok),
     listen: async (p, { caller = 'core' } = {}) => (await listen(b, [{ caller, path: p }]))[0] });
+}
+
+/** One infer call. A router that can't be reached or answers nonsense says so, naming OPA_ROUTER_URL. */
+async function think(url, req) {
+  try { return await infer(url, req); } catch (e) {
+    throw new Error(`no answer from the router at ${url} (${e.message})${process.env.OPA_ROUTER_URL ? ': check OPA_ROUTER_URL (it ends in /infer)' : ''}`);
+  }
 }
 
 /** Start every fixture in `dir`. Returns handles and a stop() function. */
@@ -162,9 +173,12 @@ export async function standInCore(env, { log = () => {} } = {}) {
   const tools = [{ name: 'find_table', description: 'Find and book a table', parameters: FIND_TABLE }];
   const system = 'You book restaurant tables for the person. When they ask for a table, call find_table with the details. After the booking, reply with one short sentence.';
   const inferArgs = { model: 'default', system, messages: [{ role: 'user', content: msg.text }], tools };
-  const inf = await infer(router.url, (() => { const r = request('infer', 'core', errandId, inferArgs); check('request', 'infer', r); check('infer.args', 'infer', inferArgs); return r; })());
+  const inf = await think(router.url, (() => { const r = request('infer', 'core', errandId, inferArgs); check('request', 'infer', r); check('infer.args', 'infer', inferArgs); return r; })());
+  if (!inf.ok) throw new Error(`the router didn't answer: ${inf.error}${inf.message ? ` (${inf.message})` : ''}`);
   check('infer.result', 'infer', inf.result);
-  const want = inf.result.tool_calls[0].arguments;
+  const call0 = inf.result.tool_calls?.[0];
+  if (call0?.name !== 'find_table') throw new Error(`the model didn't call find_table (it said: "${(inf.result.content ?? []).map((p) => p.text).join(' ').slice(0, 120)}")`);
+  const want = call0.arguments;
 
   // 3. A standing grant to search and log in, approved once with the passkey.
   const standing = await B('grant.request', { credential: 'fake-table', ops: ['search', 'login'], constraints: { site: site.origin }, mode: 'standing', ttl_seconds: 3600, purpose: 'Find a table and sign in' });
@@ -209,9 +223,12 @@ export async function standInCore(env, { log = () => {} } = {}) {
     { role: 'assistant', content: [...inf.result.content, { type: 'tool_call', call_id: call.call_id, name: call.name, arguments: call.arguments }] },
     { role: 'tool', content: [{ type: 'tool_result', call_id: call.call_id, content: done.page.text }] },
   ] };
-  const reply = await infer(router.url, request('infer', 'core', errandId, replyArgs));
-  check('infer.result', 'infer', reply.result);
-  await say(`${reply.result.content.map((p) => p.text).join(" ").trim() || "Booked."} ${want.venue}, ${want.date} at ${want.time} for ${want.party_size}. Confirmation ${confirmation}.`);
+  // The table is booked by now: if the router fails here, the person is still told, plainly.
+  const reply = await think(router.url, request('infer', 'core', errandId, replyArgs)).catch((e) => ({ ok: false, error: e.message }));
+  if (reply.ok) check('infer.result', 'infer', reply.result);
+  else log(`note: the router didn't answer the reply (${reply.error}); the table is booked, so the person is told plainly`);
+  const words = reply.ok ? reply.result.content.map((p) => p.text).join(' ').trim() : '';
+  await say(`${words || 'Booked.'} ${want.venue}, ${want.date} at ${want.time} for ${want.party_size}. Confirmation ${confirmation}.`);
   await B('browser.close', { grant_id: g, session_id });
 
   return { errandId, confirmation, standingGrant: g, bookGrant: book.grant_id };
