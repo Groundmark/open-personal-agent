@@ -64,10 +64,14 @@ export function startServer(config, adapters = buildAdapters(config), { host = '
       try {
         for await (const c of req) {
           size += c.length;
-          if (size > MAX_BODY) { res.writeHead(413).end(); req.destroy(); return; }
+          if (size > MAX_BODY) {   // answer 413, and close only once the answer has gone out
+            if (!res.headersSent) res.writeHead(413, { connection: 'close' }).end(() => req.destroy());
+            continue;
+          }
           chunks.push(c);
         }
       } catch { req.destroy(); return; }   // the caller hung up mid-request: nobody to answer
+      if (res.headersSent) return;   // too large, already answered
       try { env = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
       const out = await handle(adapters, env, logLine);
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(out));

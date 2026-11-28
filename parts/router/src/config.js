@@ -43,7 +43,9 @@ export function parseToml(text) {
 }
 
 function value(v, n) {
-  if (/^"([^"\\]|\\.)*"$/.test(v)) return JSON.parse(v);
+  if (/^"([^"\\]|\\.)*"$/.test(v)) {
+    try { return JSON.parse(v); } catch { throw new Error(`router.toml line ${n}: unsupported escape in ${v}`); }
+  }
   if (v === 'true' || v === 'false') return v === 'true';
   if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
   throw new Error(`router.toml line ${n}: unsupported value ${v}`);
@@ -61,7 +63,11 @@ export function loadConfig(file) {
     for (const k of Object.keys(obj)) if (!keys.includes(k)) throw new Error(`router.toml: ${where}${k} isn't a setting here (known: ${keys.join(', ')})`);
   };
   only('', t, ['server', 'models']);
-  if (t.server !== undefined) { if (typeof t.server !== 'object') throw new Error('router.toml: server must be a table'); only('server.', t.server, ['port', 'log', 'record']); }
+  if (t.server !== undefined) { if (typeof t.server !== 'object') throw new Error('router.toml: server must be a table'); only('server.', t.server, ['port', 'log', 'record']);
+    const s = t.server;
+    if (s.port !== undefined && !(Number.isInteger(s.port) && s.port >= 0 && s.port <= 65535)) throw new Error('router.toml: server.port must be a whole number from 0 to 65535');
+    for (const k of ['log', 'record']) if (s[k] !== undefined && !(typeof s[k] === 'string' && s[k])) throw new Error(`router.toml: server.${k} must be a file path in quotes`);
+  }
   for (const [name, m] of Object.entries(models)) {
     if (typeof m !== 'object') throw new Error(`router.toml: models.${name} must be a table`);
     if (!['openai', 'replay'].includes(m.provider)) throw new Error(`router.toml: models.${name}.provider must be "openai" or "replay"`);
