@@ -1,7 +1,7 @@
 // Any OpenAI-compatible chat completions endpoint: OpenRouter, a local model server, OpenAI itself.
 // Translates the contract's neutral request and result both ways. Everything from the provider is checked
 // before it is believed: a reply that is malformed or ends for an unknown reason is a provider_error, never a
-// normal answer; one cut off at the reply limit is stop "max_tokens" with no tool calls. Error messages are fixed text, never the provider's own words
+// normal answer; one cut off at the reply limit is stop "max_tokens", and one refused is stop "refused", both with no tool calls. Error messages are fixed text, never the provider's own words
 // (which can quote the prompt).
 import { RouterError } from '../errors.js';
 import { isObj, isStr, isCount } from '../check.js';
@@ -61,6 +61,19 @@ export function fromOpenAI(json, provider) {
   if (choice.finish_reason === 'length' && choice.native_finish_reason !== 'refusal') {
     return { content: msg.content ? [{ type: 'text', text: msg.content }] : [], tool_calls: [], stop: 'max_tokens', usage: usageOf(json), served_by: { provider, model: isStr(json.model) ? json.model : '' } };
   }
+  // The finish reason first. A native refusal stands on its own when no finish reason is given, but an unknown
+  // one (OpenRouter's "error") is a provider_error even when the provider also marks it a refusal.
+  const fr = choice.finish_reason;
+  const nativeRefusal = choice.native_finish_reason === 'refusal';
+  const known = isStr(fr) && Object.hasOwn(STOP, fr);
+  if (!known && !(nativeRefusal && (fr === undefined || fr === null))) {
+    throw new RouterError('provider_error', 'provider finished for an unexpected reason');   // includes "error", and none at all
+  }
+  // A refusal carries no tool calls: nothing in a reply the provider refused or filtered is acted on.
+  if (nativeRefusal || fr === 'content_filter') {
+    return { content: msg.content ? [{ type: 'text', text: msg.content }] : [], tool_calls: [], stop: 'refused', usage: usageOf(json), served_by: { provider, model: isStr(json.model) ? json.model : '' } };
+  }
+  let stop = STOP[fr];
   if (msg.tool_calls !== undefined && msg.tool_calls !== null && !Array.isArray(msg.tool_calls)) throw malformed('tool_calls is not a list');
   const tool_calls = (msg.tool_calls || []).map((tc) => {
     if (!isObj(tc) || !isStr(tc.id) || !isObj(tc.function) || !isStr(tc.function.name) || !isStr(tc.function.arguments)) throw malformed('a tool call is incomplete');
@@ -69,10 +82,6 @@ export function fromOpenAI(json, provider) {
     if (!isObj(a)) throw malformed('a tool call\'s arguments are not a JSON object');
     return { call_id: tc.id, name: tc.function.name, arguments: a };
   });
-  let stop;
-  if (choice.native_finish_reason === 'refusal') stop = 'refused';
-  else if (isStr(choice.finish_reason) && Object.hasOwn(STOP, choice.finish_reason)) stop = STOP[choice.finish_reason];
-  else throw new RouterError('provider_error', 'provider finished for an unexpected reason');   // includes OpenRouter's "error", and none at all
   if (stop === 'tool_calls' && !tool_calls.length) throw malformed('finished for tool calls but sent none');
   if (tool_calls.length && stop === 'end') stop = 'tool_calls';
   return {

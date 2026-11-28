@@ -226,3 +226,65 @@ test('follow-ups: a misspelt setting is an error; an empty message is bad_reques
     assert.deepEqual(x.tool_calls, []);
   }
 });
+
+test('review of 5b43cb0: refusals carry no tool calls, an error is never a refusal, empty text is bad_request', async () => {
+  const reply = (message, finish_reason, extra = {}) => ({ model: 'm', choices: [{ message, finish_reason, ...extra }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  const buy = { content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'buy', arguments: '{}' } }] };
+  for (const r of [reply(buy, 'content_filter'), reply(buy, 'tool_calls', { native_finish_reason: 'refusal' }), reply(buy, 'length', { native_finish_reason: 'refusal' })]) {
+    const x = fromOpenAI(r, 'p');
+    assert.equal(x.stop, 'refused');
+    assert.deepEqual(x.tool_calls, []);
+  }
+  // A refusal with a broken tool call is still just a refusal.
+  assert.equal(fromOpenAI(reply({ content: 'no', tool_calls: [{ id: 'c1' }] }, 'content_filter'), 'p').stop, 'refused');
+  for (const fr of ['error', 'something_new']) {
+    assert.throws(() => fromOpenAI(reply({ content: '' }, fr, { native_finish_reason: 'refusal' }), 'p'), (e) => e.code === 'provider_error', fr);
+  }
+  const bare = fromOpenAI(reply(buy, null, { native_finish_reason: 'refusal' }), 'p');   // no finish reason: the native refusal stands
+  assert.equal(bare.stop, 'refused');
+  assert.deepEqual(bare.tool_calls, []);
+  // A recorded refusal with tool calls isn't believed either.
+  const d = tmp(); const rec = path.join(d, 'rec.jsonl');
+  fs.writeFileSync(rec, JSON.stringify({ key: requestKey(hi), result: { ...RESULT, stop: 'refused', tool_calls: [{ call_id: 'c1', name: 'buy', arguments: {} }] } }) + '\n');
+  await assert.rejects(replayAdapter({ file: rec })(hi), (e) => e.code === 'provider_error');
+
+  const empty = [
+    { role: 'assistant', content: [{ type: 'text', text: '' }] },
+    { role: 'user', content: [{ type: 'text', text: '' }, { type: 'text', text: '' }] },
+    { role: 'user', content: '' },
+    { role: 'assistant', content: '' },
+  ];
+  for (const m of empty) {
+    assert.equal((await handle(fixed, env({ model: 'default', messages: [{ role: 'user', content: 'x' }, m] }))).error, 'bad_request', JSON.stringify(m));
+  }
+  // Empty text beside a tool call is fine.
+  const withCall = { role: 'assistant', content: [{ type: 'text', text: '' }, { type: 'tool_call', call_id: 'c1', name: 'f', arguments: {} }] };
+  assert.equal((await handle(fixed, env({ model: 'default', messages: [{ role: 'user', content: 'x' }, withCall] }))).ok, true);
+});
+
+test('review of 5b43cb0: an oversize request gets its 413; [server] settings and string escapes are checked with a line', async () => {
+  const r = await startServer({ port: 0, log: null }, fixed);
+  try {
+    const u = new URL(r.url);
+    const status = await new Promise((res, rej) => {
+      const req = http.request({ host: u.hostname, port: u.port, path: '/infer', method: 'POST' }, (resp) => { resp.resume(); res(resp.statusCode); });
+      req.on('error', rej);
+      const chunk = Buffer.alloc(1024 * 1024, 'a');
+      let sent = 0;
+      const pump = () => { while (sent < 10) { sent++; if (!req.write(chunk)) { req.once('drain', pump); return; } } req.end(); };
+      pump();
+    });
+    assert.equal(status, 413);
+    assert.equal((await post(r.url, env(hi))).ok, true);   // and the router carries on
+  } finally { await r.close(); }
+
+  assert.throws(() => parseToml('a = "x\\\'y"'), /router\.toml line 1: unsupported escape/);
+  const d = tmp(); const f = path.join(d, 'r.toml');
+  const base = '[models.default]\nprovider = "replay"\nfile = "x.jsonl"\n';
+  for (const [server, re] of [['port = "abc"', /server\.port must be/], ['port = 70000', /server\.port must be/], ['record = true', /server\.record must be/], ['log = 3', /server\.log must be/]]) {
+    fs.writeFileSync(f, `[server]\n${server}\n` + base);
+    assert.throws(() => loadConfig(f), re, server);
+  }
+  fs.writeFileSync(f, '[server]\nport = 0\nlog = "a.log"\nrecord = "r.jsonl"\n' + base);
+  assert.equal(loadConfig(f).port, 0);
+});

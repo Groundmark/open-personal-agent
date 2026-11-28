@@ -31,9 +31,12 @@ export function checkArgs(a) {
     if (!isObj(m) || !isStr(m.role) || !Object.hasOwn(PARTS, m.role)) bad('message role must be user, assistant or tool');
     if (isStr(m.content)) {
       if (m.role === 'tool') bad('tool messages take a list of tool_result parts');
+      if (!m.content) bad('a message needs some text');
     } else if (Array.isArray(m.content)) {
       if (!m.content.length) bad('a message needs at least one part');   // an empty one would vanish or be refused upstream
       for (const p of m.content) checkPart(p, m.role, bad);
+      // Parts that are all empty text would go upstream as an empty message, which providers refuse.
+      if (m.role !== 'tool' && !m.content.some((p) => p.type === 'tool_call' || p.text)) bad('a message needs some text or a tool call');
     } else bad('message content must be a string or a list of parts');
   }
   if (a.tools !== undefined) {
@@ -51,6 +54,7 @@ export function isResult(r) {
     && Array.isArray(r.content) && r.content.every((p) => isObj(p) && p.type === 'text' && isStr(p.text))
     && Array.isArray(r.tool_calls) && r.tool_calls.every((c) => isObj(c) && isStr(c.call_id) && isStr(c.name) && isObj(c.arguments))
     && STOPS.includes(r.stop) && (r.stop !== 'tool_calls' || r.tool_calls.length > 0)
+    && (r.stop !== 'refused' || r.tool_calls.length === 0)
     && isObj(r.usage) && isCount(r.usage.input_tokens) && isCount(r.usage.output_tokens);
 }
 
