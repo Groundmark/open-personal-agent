@@ -15,10 +15,13 @@ if (cmd === 'pair') {
   console.log(`From your phone, send this to the agent's Signal number (${cfg.account}) within 15 minutes:\n\n    ${newPairingCode(cfg.state_dir)}\n`);
   process.exit(0);
 }
-const ch = new SignalChannel(cfg);
-ch.attach(signalRpc(cfg.signal_cli, ['--config', cfg.signal_cli_config, '-a', cfg.account, '--trust-new-identities', 'always', 'jsonRpc'],
-  (env) => ch.onEnvelope(env).catch((e) => console.error('signal:', e.message))));
 const fromSystemd = Number(process.env.LISTEN_PID) === process.pid && Number(process.env.LISTEN_FDS) >= 1;
+if (!fromSystemd && !cfg.socket) { console.error('signal: no socket for the core: set "socket" in the config, or run under systemd'); process.exit(2); }
+const ch = new SignalChannel(cfg);
+// on-first-use: signal-cli won't send to a changed identity key, so a taken-over number gets nothing (see README).
+ch.attach(signalRpc(cfg.signal_cli, ['--config', cfg.signal_cli_config, '-a', cfg.account, '--trust-new-identities', 'on-first-use', 'jsonRpc'],
+  (env) => ch.onEnvelope(env).catch((e) => console.error('signal:', e.message)),
+  (why) => { console.error(`signal: signal-cli ${why}; stopping (systemd restarts the adapter)`); process.exit(1); }));
 await ch.listen(fromSystemd ? { fd: 3 } : cfg.socket);
-ch.watchSlots();
+ch.watchSlots().catch((e) => console.error(`signal: code slots stopped: ${e.message}`));
 console.log(`signal channel: ${cfg.account}; ${ch.status().paired ? 'paired' : 'not paired yet (run pair)'}`);

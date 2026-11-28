@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { SignalChannel, newPairingCode } from '../src/adapter.js';
+import { SignalChannel, asCode, newPairingCode, signalRpc } from '../src/adapter.js';
 
 const PERSON = 'aaaaaaaa-1111-4111-8111-111111111111', STRANGER = 'bbbbbbbb-2222-4222-8222-222222222222';
 
@@ -149,6 +149,69 @@ test('a code the broker no longer wants is not passed on as text', async () => {
     s.ch.slots = [{ slot_id: 'gone', expires_at: new Date(Date.now() + 60000).toISOString() }];
     s.broker.close();   // the broker can't take it (here: unreachable)
     await s.msg(PERSON, '123456');
-    assert.deepEqual(s.inbound(), ['[one-time code not delivered: the request for it had ended]']);
+    assert.deepEqual(s.inbound(), ["[one-time code not delivered: the agent couldn't pass it on just now; the person can send it again]"]);
+    assert.equal(s.ch.slots.length, 1);                    // kept: a second try goes to the broker, not the core
+    await s.msg(PERSON, '123456');
+    assert.ok(!s.inbound().includes('123456'));
   } finally { s.stop(); }
+});
+
+test('what counts as a code: a pasted one with any kind of space does; "ok thanks" and letters-only don\'t', () => {
+  assert.equal(asCode('771\u00a0204'), '771204');
+  assert.equal(asCode('771\n204'), '771204');
+  assert.equal(asCode('ab-12 cd'), 'ab12cd');
+  for (const t of ['ok thanks', 'hello', 'ABCD', 'the code is 771204', '12', '12345678901']) assert.equal(asCode(t), null, t);
+});
+
+test('a send to a changed identity key (a taken-over number) is refused and stops sending until a new pairing', async () => {
+  const s = await setup();
+  try {
+    await s.msg(PERSON, newPairingCode(s.dir));
+    s.ch.rpc = { call: async (m) => (m === 'send' ? { timestamp: 2, results: [{ type: 'UNTRUSTED_IDENTITY' }] } : []) };
+    await assert.rejects(s.ch.send({ to: PERSON, text: 'Approve: https://approve.example/a/X' }), (e) => e.code === 'not_paired');
+    assert.equal(s.ch.status().needs_repair, true);
+    await assert.rejects(s.ch.send({ to: PERSON, text: 'more' }), (e) => e.code === 'not_paired');
+  } finally { s.stop(); }
+});
+
+test('signal-cli that can\'t start, or stops: calls fail at once and the adapter is told', async () => {
+  let why = null;
+  const rpc = signalRpc('/nonexistent/signal-cli', [], () => {}, (w) => { why = w; });
+  await assert.rejects(rpc.call('send', {}));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.match(why, /couldn't start: ENOENT/);
+  let gone = null;
+  const quits = signalRpc(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 50)'], () => {}, (w) => { gone = w; });
+  await assert.rejects(quits.call('listIdentities'), /signal-cli exited/);
+  assert.match(gone, /exited \(3\)/);
+});
+
+test('pairing waits for the sender\'s identity key, and keeps the code until it has one', async () => {
+  const s = await setup();
+  try {
+    const code = newPairingCode(s.dir);
+    delete s.identities[PERSON];
+    await s.msg(PERSON, code);
+    assert.equal(s.ch.status().paired, false);
+    assert.ok(fs.existsSync(path.join(s.dir, 'pair-code.json')));    // still good
+    s.identities[PERSON] = 'fp-person-1';
+    await s.msg(PERSON, code);
+    assert.equal(s.ch.status().paired, true);
+    assert.equal(fs.existsSync(path.join(s.dir, 'pair-code.json')), false);
+  } finally { s.stop(); }
+});
+
+test('the core\'s socket: none configured is an error; a stale file is cleared; one in use is an error', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opa-signal-sock-'));
+  const p = path.join(dir, 's.sock');
+  const mk = () => new SignalChannel({ state_dir: dir, core_socket: path.join(dir, 'c.sock') });
+  await assert.rejects(mk().listen(undefined), /no socket/);
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(p)}, () => console.log('up'))`]);
+  await new Promise((r) => child.stdout.once('data', r));
+  child.kill('SIGKILL'); await new Promise((r) => child.once('exit', r));
+  const a = mk(); await a.listen(p);
+  assert.equal(fs.statSync(p).mode & 0o777, 0o600);
+  await assert.rejects(mk().listen(p), /in use/);
+  a.close();
 });

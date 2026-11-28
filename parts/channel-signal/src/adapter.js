@@ -12,14 +12,23 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomInt } from 'node:crypto';
 import { createConnection, createServer } from 'node:net';
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const ulid = () => { let t = ''; for (let i = 0, n = Date.now(); i < 10; i++, n = Math.floor(n / 32)) t = B32[n % 32] + t; return t + Array.from({ length: 16 }, () => B32[randomInt(32)]).join(''); };
-const CODE = /^[A-Za-z0-9](?:[A-Za-z0-9 -]{2,16})[A-Za-z0-9]$/;
+// A site's one-time code: letters, digits, spaces (any kind, so one pasted from an SMS counts) and dashes, which
+// strip to 4 to 10 letters and digits with at least one digit. Narrower than contracts/channel.md (no digit needed
+// there): without it, "ok thanks" sent while a code is awaited would go to the site as the code.
+export function asCode(text) {
+  const t = text.trim();
+  if (!/^[A-Za-z0-9\s-]+$/.test(t)) return null;
+  const stripped = t.replace(/[\s-]/g, '');
+  return /^[A-Za-z0-9]{4,10}$/.test(stripped) && /\d/.test(stripped) ? stripped : null;
+}
+const CALL_TIMEOUT_MS = 30_000;
 
 /** Makes a pairing code and stores only its hash. Returns the code, for the installer to show. */
 export function newPairingCode(stateDir, now = Date.now()) {
@@ -28,11 +37,24 @@ export function newPairingCode(stateDir, now = Date.now()) {
   return code;
 }
 
-/** JSON-RPC to signal-cli over its stdin/stdout. `onReceive(envelope)` gets incoming messages. */
-export function signalRpc(command, args, onReceive) {
+/**
+ * JSON-RPC to signal-cli over its stdin/stdout. `onReceive(envelope)` gets incoming messages; `onDead(why)` is called
+ * once if signal-cli can't start or stops (the adapter is no use without it: main.js exits and systemd restarts it).
+ */
+export function signalRpc(command, args, onReceive, onDead = () => {}) {
   const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'inherit'] });
   const pending = new Map();
-  let next = 1;
+  let next = 1, dead = false;
+  const die = (why) => {
+    if (dead) return;
+    dead = true;
+    for (const p of pending.values()) p.reject(new Error(`signal-cli ${why}`));
+    pending.clear();
+    onDead(why);
+  };
+  child.on('error', (e) => die(`couldn't start: ${e.code || e.message}`));
+  child.on('exit', (code, sig) => die(`exited (${sig || code})`));
+  child.stdin.on('error', () => die('closed its input'));
   createInterface({ input: child.stdout }).on('line', (line) => {
     let m; try { m = JSON.parse(line); } catch { return; }
     if (m.id !== undefined && pending.has(m.id)) {
@@ -44,8 +66,10 @@ export function signalRpc(command, args, onReceive) {
   return {
     child,
     call: (method, params = {}) => new Promise((resolve, reject) => {
+      if (dead) return reject(new Error('signal-cli is not running'));
       const id = next++;
-      pending.set(id, { resolve, reject });
+      const t = setTimeout(() => { pending.delete(id); reject(new Error(`signal-cli: no answer to ${method}`)); }, CALL_TIMEOUT_MS);
+      pending.set(id, { resolve: (v) => { clearTimeout(t); resolve(v); }, reject: (e) => { clearTimeout(t); reject(e); } });
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params, id }) + '\n');
     }),
     close: () => { child.stdin.end(); child.kill(); },
@@ -78,13 +102,12 @@ export class SignalChannel {
     try { await this.rpc.call('send', { recipient: [to], message: text }); } catch (e) { this.log(`signal: send failed: ${e.message}`); }
   }
 
+  /** Whether `text` is the live pairing code. Doesn't spend it: that's done once the pairing is saved. */
   #pairCodeOk(text) {
     const f = join(this.cfg.state_dir, 'pair-code.json');
     if (!existsSync(f)) return false;
     const c = JSON.parse(readFileSync(f, 'utf8'));
-    if (!(c.until > this.now()) || sha(text.trim()) !== c.sha256) return false;
-    unlinkSync(f);   // single use
-    return true;
+    return c.until > this.now() && sha(text.trim()) === c.sha256;
   }
 
   /** One incoming Signal message. */
@@ -96,10 +119,16 @@ export class SignalChannel {
 
     if (!this.pairing || this.pairing.needs_repair) {
       if (this.#pairCodeOk(text)) {
+        // The key first: without one there's nothing to pin, so the code stays good for another try.
+        let key = null;
+        try { key = await this.#fingerprint(from); } catch (e) { this.log(`signal: can't read identity keys: ${e.message}`); }
+        if (!key) { this.log('signal: pairing refused: no identity key for the sender yet; the code is still good'); return; }
+        if (!this.#pairCodeOk(text)) return;   // spent by another message meanwhile
         const again = this.pairing?.needs_repair && this.pairing.account_id === from;
         const dropped = again ? this.counts.from_changed_key : 0;
-        this.pairing = { channel: this.cfg.name, account_id: from, identity_key: await this.#fingerprint(from), paired_at: new Date(this.now()).toISOString() };
+        this.pairing = { channel: this.cfg.name, account_id: from, identity_key: key, paired_at: new Date(this.now()).toISOString() };
         this.#savePairing();
+        try { unlinkSync(join(this.cfg.state_dir, 'pair-code.json')); } catch {}   // single use
         this.log(`signal: paired with ${from.slice(0, 8)}…`);
         await this.#reply(from, again && dropped ? `Paired again. While we were unpaired, ${dropped} message${dropped === 1 ? ' from your account was' : 's from your account were'} dropped.` : 'Paired.');
         this.counts.from_changed_key = 0;
@@ -120,29 +149,37 @@ export class SignalChannel {
     }
 
     // A one-time code while the broker waits for one: to the broker, never the core.
-    const stripped = text.trim().replace(/[\s-]/g, '');
+    const code = asCode(text);
     this.slots = this.slots.filter((s) => s.expires_at > new Date(this.now()).toISOString());
-    if (this.slots.length && CODE.test(text.trim()) && /^[A-Za-z0-9]{4,10}$/.test(stripped)) {
-      const slot = this.slots.shift();
-      const r = await this.#broker('code.deliver', { slot_id: slot.slot_id, code: stripped });
+    if (this.slots.length && code) {
+      const slot = this.slots[0];
+      const r = await this.#broker('code.deliver', { slot_id: slot.slot_id, code });
+      // The slot goes only when the broker says it's done (filled, or gone: the format was checked, so bad_request
+      // means that); after a hiccup the person can send the code again to the same slot.
+      const done = r.ok || r.error === 'bad_request' || r.error === 'code_timeout';
+      if (done) this.slots = this.slots.filter((s) => s.slot_id !== slot.slot_id);
       if (r.ok) return this.#toCore('[one-time code delivered]', env);
-      // Once taken for a code, it never goes on as text: the core hears only that it came too late.
-      this.log(`signal: code.deliver refused: ${r.error}`);
-      return this.#toCore('[one-time code not delivered: the request for it had ended]', env);
+      this.log(`signal: code.deliver failed: ${r.error}`);
+      // Once taken for a code, it never goes on as text.
+      return this.#toCore(done ? '[one-time code not delivered: the request for it had ended]' : "[one-time code not delivered: the agent couldn't pass it on just now; the person can send it again]", env);
     }
     await this.#toCore(text, env);
   }
 
-  #ask(socket, op, args, caller) {
+  #ask(socket, op, args, caller, timeoutMs = 15_000) {
     return new Promise((resolve) => {
       const req = { op, id: ulid(), caller, errand_id: null, ts: new Date(this.now()).toISOString(), args };
       const c = createConnection(socket, () => c.write(JSON.stringify(req) + '\n'));
-      let b = ''; c.on('data', (d) => { b += d; });
-      c.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({ ok: false, error: 'bad_answer' }); } });
-      c.on('error', (e) => resolve({ ok: false, error: e.code }));
+      let b = '', done = false;
+      const end = (r) => { if (!done) { done = true; c.destroy(); resolve(r); } };
+      c.setEncoding('utf8');
+      c.setTimeout(timeoutMs, () => end({ ok: false, error: 'timeout' }));
+      c.on('data', (d) => { b += d; });
+      c.on('end', () => { try { end(JSON.parse(b)); } catch { end({ ok: false, error: 'bad_answer' }); } });
+      c.on('error', (e) => end({ ok: false, error: e.code }));
     });
   }
-  #broker(op, args) { return this.#ask(this.cfg.broker_socket, op, args, `channel-${this.cfg.name}`); }
+  #broker(op, args, timeoutMs) { return this.#ask(this.cfg.broker_socket, op, args, `channel-${this.cfg.name}`, timeoutMs); }
 
   async #toCore(text, env) {
     const r = await this.#ask(this.cfg.core_socket, 'channel.inbound', {
@@ -160,8 +197,12 @@ export class SignalChannel {
     let cursor;
     while (!this.stopped && this.cfg.broker_socket) {
       const started = Date.now();
-      const r = await this.#broker('code.slots', { wait_seconds: 50, ...(cursor ? { cursor } : {}) });
-      if (!r.ok) { if (r.error === 'unknown_op') return; await new Promise((x) => setTimeout(x, 5000)); continue; }
+      const r = await this.#broker('code.slots', { wait_seconds: 50, ...(cursor ? { cursor } : {}) }, 65_000);
+      if (r.ok && !Array.isArray(r.result?.slots)) r.ok = false, r.error = 'bad_answer';
+      if (!r.ok) {
+        if (r.error === 'unknown_op') { this.log('signal: the broker has no code slots: one-time codes are off'); return; }
+        await new Promise((x) => setTimeout(x, 5000)); continue;
+      }
       cursor = r.result.cursor;
       const now = new Date(this.now()).toISOString(), known = new Set(this.slots.map((s) => s.slot_id));
       const fresh = r.result.slots.filter((s) => !known.has(s.slot_id));
@@ -177,9 +218,21 @@ export class SignalChannel {
     if (a.to !== this.pairing.account_id) throw Object.assign(new Error(a.to), { code: 'recipient_not_allowed' });
     let r;
     try { r = await this.rpc.call('send', { recipient: [a.to], message: a.text }); } catch (e) {
-      throw Object.assign(new Error(`signal: ${e.message}`), { code: 'channel_unavailable' });
+      if (/untrusted|identity/i.test(e.message)) this.#keyChanged();
+      throw Object.assign(new Error(`signal: ${e.message}`), { code: this.pairing.needs_repair ? 'not_paired' : 'channel_unavailable' });
+    }
+    // signal-cli runs with on-first-use trust, so it won't send to a changed key (someone who took over the number).
+    if ((r?.results ?? []).some((x) => x?.type === 'UNTRUSTED_IDENTITY')) {
+      this.#keyChanged();
+      throw Object.assign(new Error('the person\'s identity key changed'), { code: 'not_paired' });
     }
     return { message_id: `sig-${r?.timestamp ?? Date.now()}`, sent_at: new Date(this.now()).toISOString() };
+  }
+
+  #keyChanged() {
+    if (this.pairing.needs_repair) return;
+    this.pairing.needs_repair = true; this.#savePairing();
+    this.log('signal: identity_changed for the paired account (on send); nothing more is sent until a new pairing');
   }
 
   status() {
@@ -188,8 +241,11 @@ export class SignalChannel {
 
   /** The adapter's own socket, for the core: channel.send and status. */
   async listen(where) {
+    if (!where) throw new Error('signal: no socket for the core: set "socket" in the config, or run under systemd');
+    if (typeof where === 'string') await clearStaleSocket(where);
     this.server = createServer((c) => {
       let b = '', done = false;
+      c.setEncoding('utf8');
       c.on('error', () => {});
       c.on('data', async (d) => {
         if (done) return;
@@ -206,7 +262,21 @@ export class SignalChannel {
       });
     });
     await new Promise((r, j) => { this.server.once('error', j); this.server.listen(where, r); });
+    if (typeof where === 'string') chmodSync(where, 0o600);
   }
 
   close() { this.stopped = true; this.server?.close(); this.rpc?.close?.(); }
+}
+
+/** A socket file left by an adapter that died is removed; one still answering (another adapter running) is an error. */
+async function clearStaleSocket(path) {
+  let st;
+  try { st = lstatSync(path); } catch { return; }
+  if (!st.isSocket()) throw new Error(`signal: ${path} exists and is not a socket`);
+  const live = await new Promise((resolve, reject) => {
+    const c = createConnection(path, () => { c.destroy(); resolve(true); });
+    c.on('error', (e) => (e.code === 'ECONNREFUSED' ? resolve(false) : reject(new Error(`signal: can't check ${path}: ${e.code}`))));
+  });
+  if (live) throw new Error(`signal: ${path} is in use: is another Signal adapter running?`);
+  unlinkSync(path);
 }
