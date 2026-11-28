@@ -10,6 +10,11 @@ incus exec opa -- install -d -m 0755 /etc/opa
 incus exec opa -- sh -c 'getent group opa-core-callers >/dev/null || groupadd --system opa-core-callers'   # the broker calls the core by this group
 incus file push --mode 0644 "$here/broker.json" opa/etc/opa/broker.json
 for u in opa-broker-core.socket opa-broker.service; do incus file push "$here/$u" "opa/etc/systemd/system/$u"; done
-# The vault's credentials, by systemd LoadCredential= (re-enabled after Incus's drop-in switches it off), and the bw state dir.
-incus exec opa -- sh -c 'install -d -o opa-broker -g opa-broker -m 0700 /var/lib/opa/broker/bw && mkdir -p /etc/systemd/system/opa-broker.service.d && printf "[Service]\nLoadCredential=bw-client-id:/etc/opa/credentials/bw-client-id\nLoadCredential=bw-client-secret:/etc/opa/credentials/bw-client-secret\nLoadCredential=bw-password:/etc/opa/credentials/bw-password\n" > /etc/systemd/system/opa-broker.service.d/zzzz-credentials.conf'
+# The vault's credentials, by systemd LoadCredential= (re-enabled after Incus's drop-in switches it off), and the bw state
+# dir. Only with a vault (vault/install.sh makes the files): systemd won't start a unit whose credential file is missing.
+incus exec opa -- sh -c 'install -d -o opa-broker -g opa-broker -m 0700 /var/lib/opa/broker/bw && mkdir -p /etc/systemd/system/opa-broker.service.d
+  conf=/etc/systemd/system/opa-broker.service.d/zzzz-credentials.conf
+  if [ -f /etc/opa/credentials/bw-client-id ]; then
+    printf "[Service]\nLoadCredential=bw-client-id:/etc/opa/credentials/bw-client-id\nLoadCredential=bw-client-secret:/etc/opa/credentials/bw-client-secret\nLoadCredential=bw-password:/etc/opa/credentials/bw-password\n" > $conf
+  else rm -f $conf; fi'
 incus exec opa -- sh -c 'systemctl daemon-reload && systemctl enable --now opa-broker-core.socket && systemctl enable opa-broker && systemctl restart opa-broker'

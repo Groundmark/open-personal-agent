@@ -19,6 +19,8 @@ ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 Restart=on-failure
+# After a reboot the vault may still be starting: don't use up the start limit in a second.
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
