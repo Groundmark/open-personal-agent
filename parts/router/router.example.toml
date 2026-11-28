@@ -1,0 +1,32 @@
+# The router's config. Logical model names are what the core asks for; swapping a model is one line.
+
+[server]
+port = 8411
+log = "/var/lib/opa/router/calls.jsonl"   # one line per call: model, tokens, errand_id. Never prompts
+# record = "/var/lib/opa/router/recordings.jsonl"   # append every live answer, for replay
+
+[models.default]
+provider = "openai"                        # any OpenAI-compatible endpoint
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-haiku-5.5"
+credential = "inference-openrouter"        # file name in $CREDENTIALS_DIRECTORY (systemd LoadCredential=)
+# max_tokens = 16000                       # optional: reply limit when the caller sets none (else the provider's default)
+# timeout_s = 120                          # optional: give up on the provider after this many seconds (default 120)
+
+[models.cheap]
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "anthropic/claude-haiku-5.5"
+credential = "inference-openrouter"
+
+# [models.local]
+# provider = "openai"
+# base_url = "http://127.0.0.1:11434/v1"   # e.g. a local model server
+# model = "<model>"
+# credential = "inference-local"
+
+# To replay instead, replace the [models.default] table above with this one
+# (a table named twice is an error):
+# [models.default]
+# provider = "replay"                      # recorded answers, no model, no key
+# file = "test/recordings.jsonl"

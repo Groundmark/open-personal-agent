@@ -1,0 +1,14 @@
+{
+  "name": "@open-personal-agent/router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The model router (contracts/router.md): POST /infer on loopback, one neutral request in, the configured provider out.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "bin": { "opa-router": "src/main.js" },
+  "scripts": {
+    "start": "node src/main.js router.toml",
+    "test": "node --test test/*.test.js"
+  }
+}
