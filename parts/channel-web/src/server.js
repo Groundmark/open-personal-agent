@@ -40,8 +40,14 @@ const CORE_TIMEOUT_MS = 15_000;
 const HERE_MS = 35_000;          // a page that said "here" this recently is taken as in view
 const ACK_WAIT_MS = 10_000;      // ...and gets this long to say it showed a message before a notification goes anyway
 const APPROVAL_TIMEOUT_MS = 30_000;
-// A site's one-time code, as the Signal adapter reads one: 4 to 10 letters and digits, spaces or dashes allowed.
-const CODE = /^[A-Za-z0-9](?:[A-Za-z0-9 -]{2,16})[A-Za-z0-9]$/;
+// A site's one-time code, as the Signal adapter reads one: letters, digits, spaces (any kind) and dashes, which strip
+// to 4 to 10 letters and digits with at least one digit. Narrower than contracts/channel.md (no digit needed there):
+// without it, "ok thanks" sent while a code is awaited would go to the site as the code.
+function asCode(text) {
+  if (!/^[A-Za-z0-9\s-]+$/.test(text)) return null;
+  const stripped = text.replace(/[\s-]/g, '');
+  return /^[A-Za-z0-9]{4,10}$/.test(stripped) && /\d/.test(stripped) ? stripped : null;
+}
 // What the chat shows (on every device, and in the page's saved copy) in place of a code.
 const CODE_SHOWN = {
   delivered: '(one-time code, sent to the site)',
@@ -268,8 +274,8 @@ export class WebChannel {
    * ended, or it expires: if the broker couldn't be reached, the next try goes to the same slot.
    */
   #maybeCode(text) {
-    const stripped = text.replace(/[\s-]/g, '');
-    if (!CODE.test(text) || !/^[A-Za-z0-9]{4,10}$/.test(stripped)) return null;
+    const stripped = asCode(text);
+    if (!stripped) return null;
     const open = () => { const now = new Date(this.now()).toISOString(); this.slots = this.slots.filter((x) => x.expires_at > now); return this.slots[0]; };
     if (!open() && !this.codesInFlight) return null;
     this.codesInFlight += 1;

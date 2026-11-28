@@ -286,6 +286,7 @@ test('a one-time code typed while the broker waits for one goes to the broker, n
     assert.equal((await req(s.port, 'POST', '/api/send', { text: '654321' }, { cookie })).body.code, 'late');
     assert.equal(s.inbound.at(-1).args.text, '[one-time code not delivered: the request for it had ended]');
     assert.equal((await req(s.port, 'POST', '/api/send', { text: 'the code is 111222' }, { cookie })).body.display, 'the code is 111222');   // not only a code: as usual
+    assert.equal((await req(s.port, 'POST', '/api/send', { text: 'ok thanks' }, { cookie })).body.display, 'ok thanks');   // no digit: not a code
     await new Promise((x) => setTimeout(x, 50));
     assert.doesNotMatch(got + JSON.stringify(s.ch.recent) + JSON.stringify(s.inbound), /123456|123 456|654321/);
     stream.destroy();
